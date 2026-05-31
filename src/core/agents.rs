@@ -1,4 +1,9 @@
-use crate::core::ids::AgentId;
+use crate::core::{
+    config::read_config,
+    error::{Result, SkillKitsError},
+    ids::AgentId,
+    paths::AppPaths,
+};
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 
@@ -115,6 +120,29 @@ pub fn built_in_agent_config(agent_id: &AgentId) -> Option<AgentConfig> {
 
 pub fn project_skill_dirs_for(agent_id: &AgentId) -> Option<Vec<Utf8PathBuf>> {
     built_in_agent_config(agent_id).map(|agent| agent.project_skill_dirs)
+}
+
+pub fn configured_project_skill_dirs_for(
+    paths: &AppPaths,
+    agent_id: &AgentId,
+) -> Result<Vec<Utf8PathBuf>> {
+    let config = read_config(paths)?;
+    config
+        .agents
+        .into_iter()
+        .find(|agent| agent.id == *agent_id)
+        .map(|agent| {
+            if agent.project_skill_dirs.is_empty() {
+                project_skill_dirs_for(agent_id).unwrap_or_default()
+            } else {
+                agent.project_skill_dirs
+            }
+        })
+        .filter(|dirs| !dirs.is_empty())
+        .or_else(|| project_skill_dirs_for(agent_id))
+        .ok_or_else(|| SkillKitsError::AgentNotFound {
+            agent_id: agent_id.clone(),
+        })
 }
 
 pub fn global_skill_dirs_for(agent_id: &AgentId) -> Option<Vec<Utf8PathBuf>> {

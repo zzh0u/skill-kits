@@ -1,6 +1,9 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use skill_kits::core::{
     adopt::{project_adopt, project_adopt_all, ProjectAdoptRequest},
+    agents::{AgentConfig, AgentKind},
+    config::Config,
+    hash::hash_skill_dir,
     ids::{AgentId, SkillId},
     paths::AppPaths,
     project::{
@@ -62,6 +65,80 @@ fn seed_managed_skill(paths: &AppPaths, id: &str, name: &str, body: &str) -> Man
         &DeploymentsRegistry::default(),
     );
     skill
+}
+
+#[test]
+fn configured_custom_agent_project_skill_dir_is_used_for_deploy_status_and_adopt() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let custom_agent = AgentConfig {
+        id: AgentId::new("custom"),
+        label: "Custom".to_string(),
+        kind: AgentKind::Custom,
+        global_skill_dirs: Vec::new(),
+        project_skill_dirs: vec![".custom/skills".into()],
+        enabled: true,
+    };
+    write_toml(
+        &paths.config_file,
+        &Config {
+            agents: vec![custom_agent],
+            ..Config::default()
+        },
+    );
+    seed_managed_skill(
+        &paths,
+        "frontend-design-a1b2c3d4",
+        "frontend-design",
+        "# Frontend\n",
+    );
+    let project = Utf8PathBuf::from_path_buf(temp_dir.path().join("project")).unwrap();
+
+    let deployed = deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("custom"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+
+    assert_eq!(
+        deployed.record.deployment_path,
+        project.join(".custom/skills/frontend-design")
+    );
+    assert!(project
+        .join(".custom/skills/frontend-design/SKILL.md")
+        .exists());
+    let status =
+        project_deployment_status(&paths, &project, &AgentId::new("custom"), "frontend-design")
+            .unwrap();
+    assert_eq!(
+        status.record.deployment_path,
+        deployed.record.deployment_path
+    );
+
+    write_toml(&paths.skills_registry_file, &SkillsRegistry::default());
+    write_toml(
+        &paths.deployments_registry_file,
+        &DeploymentsRegistry::default(),
+    );
+    write_skill(&project.join(".custom/skills/local-only"), "# Local only\n");
+
+    let report = project_adopt(ProjectAdoptRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("custom"),
+        skill_name: "local-only",
+    })
+    .unwrap();
+
+    assert_eq!(report.imported, 1);
+    let adopted =
+        project_deployment_status(&paths, &project, &AgentId::new("custom"), "local-only").unwrap();
+    assert_eq!(
+        adopted.record.deployment_path,
+        project.join(".custom/skills/local-only")
+    );
 }
 
 #[test]
@@ -258,6 +335,51 @@ fn project_adopt_records_baseline() {
 }
 
 #[test]
+fn project_adopt_records_skill_and_deployment_consistently() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    write_toml(&paths.skills_registry_file, &SkillsRegistry::default());
+    write_toml(
+        &paths.deployments_registry_file,
+        &DeploymentsRegistry::default(),
+    );
+    let project = Utf8PathBuf::from_path_buf(temp_dir.path().join("project")).unwrap();
+    let deployment_dir = project.join(".agents/skills/frontend-design");
+    write_skill(&deployment_dir, "# Project copy\n");
+
+    project_adopt(ProjectAdoptRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_name: "frontend-design",
+    })
+    .unwrap();
+
+    let skills: SkillsRegistry =
+        toml::from_str(&std::fs::read_to_string(&paths.skills_registry_file).unwrap()).unwrap();
+    let deployments: DeploymentsRegistry =
+        toml::from_str(&std::fs::read_to_string(&paths.deployments_registry_file).unwrap())
+            .unwrap();
+    assert_eq!(skills.skills.len(), 1);
+    assert_eq!(deployments.deployments.len(), 1);
+    let skill = &skills.skills[0];
+    let deployment = &deployments.deployments[0];
+    assert_eq!(deployment.skill_id, skill.id);
+    assert_eq!(deployment.deployed_from_hash, skill.content_hash);
+    assert_eq!(
+        deployment.baseline_hash,
+        project_deployment_status(&paths, &project, &AgentId::new("codex"), "frontend-design")
+            .unwrap()
+            .current_hash
+            .unwrap()
+    );
+    assert_eq!(
+        skill.content_hash,
+        hash_skill_dir(&skill.managed_path).unwrap()
+    );
+}
+
+#[test]
 fn project_adopt_all_reports_partial_success() {
     let temp_dir = TempDir::new().unwrap();
     let paths = test_paths(&temp_dir);
@@ -404,6 +526,69 @@ fn promote_creates_managed_skill_fork() {
     assert_eq!(
         std::fs::read_to_string(fork.managed_path.join("SKILL.md")).unwrap(),
         "# Local fork\n"
+    );
+}
+
+#[test]
+fn promote_relinks_deployment_to_fork_consistently() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    seed_managed_skill(
+        &paths,
+        "frontend-design-a1b2c3d4",
+        "frontend-design",
+        "# Frontend\n",
+    );
+    let project = Utf8PathBuf::from_path_buf(temp_dir.path().join("project")).unwrap();
+    deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+    let deployment_dir = project.join(".agents/skills/frontend-design");
+    std::fs::write(deployment_dir.join("SKILL.md"), "# Local fork\n").unwrap();
+
+    let outcome = redeploy_project_skill(ProjectRedeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+        overwrite: false,
+        promote: true,
+    })
+    .unwrap();
+
+    let RedeployOutcome::Promoted(fork) = outcome else {
+        panic!("expected promoted fork");
+    };
+    let skills: SkillsRegistry =
+        toml::from_str(&std::fs::read_to_string(&paths.skills_registry_file).unwrap()).unwrap();
+    let deployments: DeploymentsRegistry =
+        toml::from_str(&std::fs::read_to_string(&paths.deployments_registry_file).unwrap())
+            .unwrap();
+    let deployment = deployments
+        .deployments
+        .iter()
+        .find(|deployment| deployment.skill_id == fork.id)
+        .expect("deployment relinked to promoted fork");
+    let stored_fork = skills
+        .skills
+        .iter()
+        .find(|skill| skill.id == fork.id)
+        .expect("promoted fork recorded in skills registry");
+    assert_eq!(deployment.deployed_from_hash, stored_fork.content_hash);
+    assert_eq!(
+        deployment.baseline_hash,
+        project_deployment_status(&paths, &project, &AgentId::new("codex"), "frontend-design")
+            .unwrap()
+            .current_hash
+            .unwrap()
+    );
+    assert_eq!(
+        stored_fork.content_hash,
+        hash_skill_dir(&stored_fork.managed_path).unwrap()
     );
 }
 

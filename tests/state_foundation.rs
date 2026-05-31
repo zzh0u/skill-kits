@@ -3,7 +3,7 @@ use skill_kits::core::error::SkillKitsError;
 use skill_kits::core::lock::StateLock;
 use skill_kits::core::paths::{ensure_app_dirs, AppPaths};
 use skill_kits::core::registry::{
-    read_deployments_registry, read_skills_registry, update_skills_registry,
+    read_deployments_registry, read_skills_registry, update_registry_files, update_skills_registry,
     write_deployments_registry, write_skills_registry, DeploymentsRegistry, SkillsRegistry,
 };
 use tempfile::TempDir;
@@ -74,6 +74,26 @@ fn update_skills_registry_reads_latest_state_under_lock() {
     .unwrap();
 
     assert_eq!(read_skills_registry(&paths).unwrap().version, 7);
+}
+
+#[test]
+fn update_registry_files_reads_and_writes_skills_and_deployments_under_one_lock() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+
+    let result = update_registry_files(&paths, |registries| {
+        registries.skills.version = 7;
+        registries.deployments.version = 9;
+        registries.write_skills = true;
+        registries.write_deployments = true;
+        Ok("updated")
+    })
+    .unwrap();
+
+    assert_eq!(result, "updated");
+    assert_eq!(read_skills_registry(&paths).unwrap().version, 7);
+    assert_eq!(read_deployments_registry(&paths).unwrap().version, 9);
 }
 
 #[test]

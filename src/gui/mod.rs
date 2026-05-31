@@ -52,6 +52,9 @@ impl eframe::App for SkillKitsGuiApp {
                     ui.label(egui::RichText::new("Skill-kits").strong());
                     ui.separator();
                     ui.label(scope_label(&self.model.active_scope));
+                    if ui.button("Refresh").clicked() {
+                        let _ = self.model.request_refresh_selected_project();
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(format!(
                             "{} pending intent(s)",
@@ -112,6 +115,7 @@ impl eframe::App for SkillKitsGuiApp {
             .show(ctx, |ui| {
                 let renderable = self.model.renderable_view();
                 render_inspector(ui, &renderable, self.colors);
+                render_action_controls(ui, &mut self.model, self.colors);
             });
 
         egui::CentralPanel::default()
@@ -192,6 +196,53 @@ fn render_inspector(ui: &mut egui::Ui, renderable: &RenderableView, colors: UiCo
             ui.label(egui::RichText::new(line).color(colors.ink_muted));
         }
         ui.add_space(8.0);
+    }
+}
+
+fn render_action_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColors) {
+    ui.separator();
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Controls").strong());
+    ui.add_space(4.0);
+
+    match model.active_view {
+        NavigationView::Skills => {
+            ui.horizontal(|ui| {
+                if ui.button("Scan").clicked() {
+                    let _ = model.request_scan_selected_skill();
+                }
+                if ui
+                    .button(egui::RichText::new("Uninstall").color(colors.danger))
+                    .clicked()
+                {
+                    let _ = model.request_uninstall_selected_skill();
+                }
+            });
+        }
+        NavigationView::Projects => {
+            ui.horizontal(|ui| {
+                if ui.button("Deploy").clicked() {
+                    if let Some(agent_id) = model.agents.first().map(|agent| agent.id.clone()) {
+                        let _ = model.request_deploy_selected_skill(agent_id);
+                    }
+                }
+                if ui.button("Enable").clicked() {
+                    let _ = model.request_enable_selected_deployment();
+                }
+                if ui.button("Disable").clicked() {
+                    let _ = model.request_disable_selected_deployment();
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .button(egui::RichText::new("Remove").color(colors.danger))
+                    .clicked()
+                {
+                    let _ = model.request_remove_selected_deployment(false);
+                }
+            });
+        }
+        NavigationView::Dashboard | NavigationView::Agents => {}
     }
 }
 

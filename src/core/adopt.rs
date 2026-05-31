@@ -1,5 +1,5 @@
 use crate::core::{
-    agents::{global_skill_dirs_for, project_skill_dirs_for},
+    agents::{configured_project_skill_dirs_for, global_skill_dirs_for},
     error::{Result, SkillKitsError},
     fs::{copy_dir_clean_source_to_empty_target, ensure_dir},
     hash::hash_skill_dir,
@@ -7,8 +7,8 @@ use crate::core::{
     paths::AppPaths,
     project::{copy_deployment_to_managed, deployment_id, hash_project_deployment_dir, now_string},
     registry::{
-        read_deployments_registry, read_skills_registry, write_deployments_registry,
-        write_skills_registry, DeploymentRecord, ManagedSkill, SkillSource,
+        read_skills_registry, update_registry_files, write_skills_registry, DeploymentRecord,
+        ManagedSkill, SkillSource,
     },
     skills::{disabled_skill_markdown_path, load_skill_metadata, skill_markdown_path},
 };
@@ -77,38 +77,36 @@ pub fn global_agent_adopt(request: GlobalAgentAdoptRequest<'_>) -> Result<AdoptR
 }
 
 pub fn project_adopt(request: ProjectAdoptRequest<'_>) -> Result<AdoptReport> {
-    let deployment_dir =
-        project_skill_dir(request.project_path, request.agent_id, request.skill_name)?;
+    let deployment_dir = project_skill_dir(
+        request.app_paths,
+        request.project_path,
+        request.agent_id,
+        request.skill_name,
+    )?;
     if !deployment_dir.exists() {
         return Err(SkillKitsError::SkillNotFound {
             query: request.skill_name.to_string(),
         });
     }
-    let mut skills = read_skills_registry(request.app_paths)?;
     let managed_hash = hash_skill_dir(&deployment_dir)?;
     let baseline_hash = hash_project_deployment_dir(&deployment_dir)?;
-    if let Some(existing) = skills
+    let existing_skill = read_skills_registry(request.app_paths)?
         .skills
-        .iter()
-        .find(|skill| skill.name == request.skill_name)
-    {
+        .into_iter()
+        .find(|skill| skill.name == request.skill_name);
+    if let Some(existing) = existing_skill.as_ref() {
         if existing.content_hash != managed_hash {
             return Err(SkillKitsError::AdoptionConflict {
                 name: request.skill_name.to_string(),
             });
         }
-        record_project_baseline(
-            &request,
-            &deployment_dir,
-            existing.id.as_str(),
-            &baseline_hash,
-            existing.content_hash.as_str(),
-        )?;
+        record_project_baseline(&request, &deployment_dir, existing, &baseline_hash)?;
         return Ok(AdoptReport {
             imported: 0,
             conflicts: 0,
         });
     }
+    let skills = read_skills_registry(request.app_paths)?;
     let skill_id = unique_skill_id(
         request.skill_name,
         &managed_hash,
@@ -131,15 +129,7 @@ pub fn project_adopt(request: ProjectAdoptRequest<'_>) -> Result<AdoptReport> {
         created_at: now_string(),
         updated_at: now_string(),
     };
-    skills.skills.push(managed_skill);
-    write_skills_registry(request.app_paths, &skills)?;
-    record_project_baseline(
-        &request,
-        &deployment_dir,
-        &skill_id,
-        &baseline_hash,
-        &managed_hash,
-    )?;
+    record_new_project_adopt(&request, &deployment_dir, managed_skill, &baseline_hash)?;
     Ok(AdoptReport {
         imported: 1,
         conflicts: 0,
@@ -149,7 +139,8 @@ pub fn project_adopt(request: ProjectAdoptRequest<'_>) -> Result<AdoptReport> {
 pub fn project_adopt_all(request: ProjectAdoptRequest<'_>) -> Result<AdoptReport> {
     let mut imported = 0;
     let mut conflicts = 0;
-    let deployment_root = project_skill_root(request.project_path, request.agent_id)?;
+    let deployment_root =
+        project_skill_root(request.app_paths, request.project_path, request.agent_id)?;
     if !deployment_root.exists() {
         return Ok(AdoptReport {
             imported,
@@ -255,51 +246,85 @@ fn expand_home(path: &Utf8Path, home_dir: &Utf8Path) -> Utf8PathBuf {
     }
 }
 
-fn project_skill_root(project_path: &Utf8Path, agent_id: &AgentId) -> Result<Utf8PathBuf> {
-    let dirs = project_skill_dirs_for(agent_id).ok_or_else(|| SkillKitsError::AgentNotFound {
-        agent_id: agent_id.clone(),
-    })?;
-    Ok(project_path.join(dirs.first().expect("built-in agents have project dirs")))
+fn project_skill_root(
+    app_paths: &AppPaths,
+    project_path: &Utf8Path,
+    agent_id: &AgentId,
+) -> Result<Utf8PathBuf> {
+    let dirs = configured_project_skill_dirs_for(app_paths, agent_id)?;
+    Ok(project_path.join(dirs.first().expect("agents have project dirs")))
 }
 
 fn project_skill_dir(
+    app_paths: &AppPaths,
     project_path: &Utf8Path,
     agent_id: &AgentId,
     skill_name: &str,
 ) -> Result<Utf8PathBuf> {
-    Ok(project_skill_root(project_path, agent_id)?.join(skill_name))
+    Ok(project_skill_root(app_paths, project_path, agent_id)?.join(skill_name))
 }
 
 fn record_project_baseline(
     request: &ProjectAdoptRequest<'_>,
     deployment_dir: &Utf8Path,
-    skill_id: &str,
+    skill: &ManagedSkill,
     baseline_hash: &str,
-    deployed_from_hash: &str,
 ) -> Result<()> {
-    let mut deployments = read_deployments_registry(request.app_paths)?;
+    let record = project_adopt_deployment_record(request, deployment_dir, skill, baseline_hash);
+    update_registry_files(request.app_paths, |registries| {
+        registries
+            .deployments
+            .deployments
+            .retain(|existing| existing.id != record.id);
+        registries.deployments.deployments.push(record);
+        registries.write_deployments = true;
+        Ok(())
+    })
+}
+
+fn record_new_project_adopt(
+    request: &ProjectAdoptRequest<'_>,
+    deployment_dir: &Utf8Path,
+    managed_skill: ManagedSkill,
+    baseline_hash: &str,
+) -> Result<()> {
+    update_registry_files(request.app_paths, |registries| {
+        let record =
+            project_adopt_deployment_record(request, deployment_dir, &managed_skill, baseline_hash);
+        registries.skills.skills.push(managed_skill);
+        registries
+            .deployments
+            .deployments
+            .retain(|existing| existing.id != record.id);
+        registries.deployments.deployments.push(record);
+        registries.write_skills = true;
+        registries.write_deployments = true;
+        Ok(())
+    })
+}
+
+fn project_adopt_deployment_record(
+    request: &ProjectAdoptRequest<'_>,
+    deployment_dir: &Utf8Path,
+    skill: &ManagedSkill,
+    baseline_hash: &str,
+) -> DeploymentRecord {
     let project_name = request
         .project_path
         .file_name()
         .map(|name| name.to_string())
         .unwrap_or_else(|| request.project_path.to_string());
-    let skill_id = SkillId::new(skill_id);
-    let record = DeploymentRecord {
-        id: deployment_id(request.agent_id, &skill_id, request.project_path),
-        skill_id,
+    DeploymentRecord {
+        id: deployment_id(request.agent_id, &skill.id, request.project_path),
+        skill_id: skill.id.clone(),
         agent_id: request.agent_id.clone(),
         project_name,
         project_path: request.project_path.to_path_buf(),
         deployment_path: deployment_dir.to_path_buf(),
         skill_name: request.skill_name.to_string(),
         baseline_hash: baseline_hash.to_string(),
-        deployed_from_hash: deployed_from_hash.to_string(),
+        deployed_from_hash: skill.content_hash.clone(),
         created_at: now_string(),
         updated_at: now_string(),
-    };
-    deployments
-        .deployments
-        .retain(|existing| existing.id != record.id);
-    deployments.deployments.push(record);
-    write_deployments_registry(request.app_paths, &deployments)
+    }
 }

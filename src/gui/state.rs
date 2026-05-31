@@ -2,12 +2,18 @@ use crate::core::{
     agents::AgentConfig,
     config::{read_config, RecentProject},
     ids::{AgentId, SkillId},
+    install::{uninstall_skill, UninstallSkillRequest},
     paths::AppPaths,
-    project::project_deployment_status,
+    project::{
+        deploy_project_skill, disable_project_skill, enable_project_skill,
+        project_deployment_status, remove_project_skill, ProjectDeployRequest,
+        ProjectRemoveRequest, ProjectSkillRequest,
+    },
     registry::{
         read_deployments_registry, read_skills_registry, DeploymentRecord, DeploymentStatus,
         ManagedSkill, SkillSource,
     },
+    scan::scan_skill_dir,
     Result,
 };
 use camino::Utf8PathBuf;
@@ -79,6 +85,96 @@ pub enum GuiActionIntent {
         agent_id: AgentId,
     },
     AddCustomAgent,
+}
+
+#[derive(Clone, Debug)]
+pub struct GuiController {
+    paths: AppPaths,
+}
+
+impl GuiController {
+    pub fn new(paths: AppPaths) -> Self {
+        Self { paths }
+    }
+
+    pub fn paths(&self) -> &AppPaths {
+        &self.paths
+    }
+
+    pub fn execute(&self, intent: &GuiActionIntent) -> Result<()> {
+        match intent {
+            GuiActionIntent::ScanSkill { skill_id } => {
+                if let Some(skill) = read_skills_registry(&self.paths)?
+                    .skills
+                    .into_iter()
+                    .find(|skill| skill.id == *skill_id)
+                {
+                    let _findings = scan_skill_dir(&skill.managed_path)?;
+                }
+            }
+            GuiActionIntent::UninstallSkill { skill_id } => {
+                uninstall_skill(UninstallSkillRequest {
+                    app_paths: &self.paths,
+                    query: skill_id.as_str(),
+                })?;
+            }
+            GuiActionIntent::DeploySkill {
+                project_path,
+                agent_id,
+                skill_id,
+            } => {
+                deploy_project_skill(ProjectDeployRequest {
+                    app_paths: &self.paths,
+                    project_path,
+                    agent_id,
+                    skill_query: skill_id.as_str(),
+                })?;
+            }
+            GuiActionIntent::EnableDeployment {
+                project_path,
+                agent_id,
+                skill_name,
+            } => {
+                enable_project_skill(ProjectSkillRequest {
+                    app_paths: &self.paths,
+                    project_path,
+                    agent_id,
+                    skill_query: skill_name,
+                })?;
+            }
+            GuiActionIntent::DisableDeployment {
+                project_path,
+                agent_id,
+                skill_name,
+            } => {
+                disable_project_skill(ProjectSkillRequest {
+                    app_paths: &self.paths,
+                    project_path,
+                    agent_id,
+                    skill_query: skill_name,
+                })?;
+            }
+            GuiActionIntent::RemoveDeployment {
+                project_path,
+                agent_id,
+                skill_name,
+                force,
+            } => {
+                remove_project_skill(ProjectRemoveRequest {
+                    app_paths: &self.paths,
+                    project_path,
+                    agent_id,
+                    skill_query: skill_name,
+                    force: *force,
+                })?;
+            }
+            GuiActionIntent::RefreshProject { .. }
+            | GuiActionIntent::OpenProject { .. }
+            | GuiActionIntent::EditAgent { .. }
+            | GuiActionIntent::AddCustomAgent => {}
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -253,6 +349,74 @@ impl GuiModel {
     pub fn request_refresh_selected_project(&mut self) -> Option<GuiActionIntent> {
         let project_path = self.selected_project.clone()?;
         self.push_intent(GuiActionIntent::RefreshProject { project_path })
+    }
+
+    pub fn request_enable_selected_deployment(&mut self) -> Option<GuiActionIntent> {
+        let deployment = self.selected_deployment()?.clone();
+        self.push_intent(GuiActionIntent::EnableDeployment {
+            project_path: deployment.project_path,
+            agent_id: deployment.agent_id,
+            skill_name: deployment.skill_name,
+        })
+    }
+
+    pub fn request_disable_selected_deployment(&mut self) -> Option<GuiActionIntent> {
+        let deployment = self.selected_deployment()?.clone();
+        self.push_intent(GuiActionIntent::DisableDeployment {
+            project_path: deployment.project_path,
+            agent_id: deployment.agent_id,
+            skill_name: deployment.skill_name,
+        })
+    }
+
+    pub fn request_remove_selected_deployment(&mut self, force: bool) -> Option<GuiActionIntent> {
+        let deployment = self.selected_deployment()?.clone();
+        self.push_intent(GuiActionIntent::RemoveDeployment {
+            project_path: deployment.project_path,
+            agent_id: deployment.agent_id,
+            skill_name: deployment.skill_name,
+            force,
+        })
+    }
+
+    pub fn execute_next_intent(
+        &mut self,
+        controller: &GuiController,
+    ) -> Result<Option<GuiActionIntent>> {
+        if self.pending_intents.is_empty() {
+            return Ok(None);
+        }
+        let intent = self.pending_intents.remove(0);
+        let active_view = self.active_view;
+        let active_scope = self.active_scope.clone();
+        let selected_skill = self.selected_skill.clone();
+        let selected_agent = self.selected_agent.clone();
+        let selected_project = self.selected_project.clone();
+        let selected_deployment = self.selected_deployment.clone();
+        controller.execute(&intent)?;
+        *self = Self::load(controller.paths())?;
+        self.active_view = active_view;
+        self.active_scope = active_scope;
+        self.selected_skill = selected_skill.filter(|selected| {
+            self.skills
+                .iter()
+                .any(|skill| skill.id.as_str() == selected.as_str())
+        });
+        self.selected_agent = selected_agent.filter(|selected| {
+            self.agents
+                .iter()
+                .any(|agent| agent.id.as_str() == selected.as_str())
+        });
+        self.selected_project = selected_project.or_else(|| match &self.active_scope {
+            GuiScope::GlobalInventory => None,
+            GuiScope::Project(path) => Some(path.clone()),
+        });
+        self.selected_deployment = selected_deployment.filter(|selected| {
+            self.deployments
+                .iter()
+                .any(|deployment| deployment.id == *selected)
+        });
+        Ok(Some(intent))
     }
 
     pub fn renderable_view(&self) -> RenderableView {

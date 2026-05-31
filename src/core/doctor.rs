@@ -241,23 +241,27 @@ fn check_deployments(
                 ),
             ));
         }
+        match project::toggle_state(&deployment.deployment_path) {
+            ToggleState::Enabled | ToggleState::Disabled => {}
+            ToggleState::InvalidBothPresent | ToggleState::InvalidBothMissing => {
+                issues.push(issue(
+                    DoctorIssueCode::InvalidToggle,
+                    DoctorSeverity::Error,
+                    Some(deployment.deployment_path.clone()),
+                    format!("deployment {} has invalid toggle state", deployment.id),
+                ));
+            }
+        }
+        if !deployment.deployment_path.exists() {
+            continue;
+        }
         match project::project_deployment_status(
             paths,
             &deployment.project_path,
             &deployment.agent_id,
             &deployment.skill_name,
         ) {
-            Ok(status) => match status.toggle {
-                ToggleState::Enabled | ToggleState::Disabled => {}
-                ToggleState::InvalidBothPresent | ToggleState::InvalidBothMissing => {
-                    issues.push(issue(
-                        DoctorIssueCode::InvalidToggle,
-                        DoctorSeverity::Error,
-                        Some(deployment.deployment_path.clone()),
-                        format!("deployment {} has invalid toggle state", deployment.id),
-                    ));
-                }
-            },
+            Ok(_) => {}
             Err(error) => issues.push(issue(
                 DoctorIssueCode::MissingDeployment,
                 DoctorSeverity::Warning,

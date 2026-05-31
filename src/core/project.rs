@@ -1,14 +1,14 @@
 use crate::core::{
-    agents::project_skill_dirs_for,
+    agents::configured_project_skill_dirs_for,
     error::{Result, SkillKitsError},
     fs::ensure_dir,
     hash::hash_skill_dir,
     ids::{unique_skill_id, AgentId, SkillId},
     paths::AppPaths,
     registry::{
-        read_deployments_registry, read_skills_registry, write_deployments_registry,
-        write_skills_registry, DeploymentRecord, DeploymentStatus, ManagedSkill, SkillSource,
-        ToggleState,
+        read_deployments_registry, read_skills_registry, update_registry_files,
+        write_deployments_registry, write_skills_registry, DeploymentRecord, DeploymentStatus,
+        ManagedSkill, SkillSource, ToggleState,
     },
 };
 use camino::{Utf8Path, Utf8PathBuf};
@@ -106,7 +106,8 @@ pub fn project_deployment_status(
 
 pub fn deploy_project_skill(request: ProjectDeployRequest<'_>) -> Result<DeploymentStatus> {
     let managed_skill = find_managed_skill(request.app_paths, request.skill_query)?;
-    let deployment_root = project_skill_root(request.project_path, request.agent_id)?;
+    let deployment_root =
+        project_skill_root(request.app_paths, request.project_path, request.agent_id)?;
     let deployment_dir = deployment_root.join(&managed_skill.name);
     let enabled_path = deployment_dir.join("SKILL.md");
     let disabled_path = deployment_dir.join("SKILL.md.disabled");
@@ -270,7 +271,7 @@ fn promote_project_skill(
     let deployment_id = status.record.id.clone();
     let fork_name = format!("{}-promoted", status.record.skill_name);
     let project_hash = hash_skill_dir(&status.record.deployment_path)?;
-    let mut skills = read_skills_registry(app_paths)?;
+    let skills = read_skills_registry(app_paths)?;
     let fork_id = unique_skill_id(
         &fork_name,
         &project_hash,
@@ -293,37 +294,33 @@ fn promote_project_skill(
         created_at: now_string(),
         updated_at: now_string(),
     };
-    skills.skills.push(fork.clone());
-    write_skills_registry(app_paths, &skills)?;
-    relink_deployment_to_fork(
-        app_paths,
-        &status.record,
-        &fork.id,
-        content_hash.clone(),
-        content_hash,
-    )?;
+    record_promoted_fork(app_paths, &status.record, fork.clone(), content_hash)?;
     let _ = (agent_id, skill_query);
     Ok(fork)
 }
 
-fn relink_deployment_to_fork(
+fn record_promoted_fork(
     app_paths: &AppPaths,
     existing: &DeploymentRecord,
-    fork_id: &SkillId,
-    managed_hash: String,
-    deployed_hash: String,
+    fork: ManagedSkill,
+    deployment_hash: String,
 ) -> Result<()> {
     let mut record = existing.clone();
-    record.skill_id = fork_id.clone();
-    record.deployed_from_hash = managed_hash;
-    record.baseline_hash = deployed_hash;
+    record.skill_id = fork.id.clone();
+    record.deployed_from_hash = fork.content_hash.clone();
+    record.baseline_hash = deployment_hash;
     record.updated_at = now_string();
-    let mut deployments = read_deployments_registry(app_paths)?;
-    deployments
-        .deployments
-        .retain(|entry| entry.id != record.id);
-    deployments.deployments.push(record);
-    write_deployments_registry(app_paths, &deployments)
+    update_registry_files(app_paths, |registries| {
+        registries.skills.skills.push(fork);
+        registries
+            .deployments
+            .deployments
+            .retain(|entry| entry.id != record.id);
+        registries.deployments.deployments.push(record);
+        registries.write_skills = true;
+        registries.write_deployments = true;
+        Ok(())
+    })
 }
 
 fn refresh_status(
@@ -444,21 +441,23 @@ fn upsert_existing_deployment(
     deployment_status(app_paths, &record)
 }
 
-fn project_skill_root(project_path: &Utf8Path, agent_id: &AgentId) -> Result<Utf8PathBuf> {
-    let dirs = project_skill_dirs_for(agent_id).ok_or_else(|| SkillKitsError::AgentNotFound {
-        agent_id: agent_id.clone(),
-    })?;
-    Ok(project_path.join(dirs.first().expect("built-in agents have project dirs")))
+fn project_skill_root(
+    app_paths: &AppPaths,
+    project_path: &Utf8Path,
+    agent_id: &AgentId,
+) -> Result<Utf8PathBuf> {
+    let dirs = configured_project_skill_dirs_for(app_paths, agent_id)?;
+    Ok(project_path.join(dirs.first().expect("agents have project dirs")))
 }
 
 fn deployment_for_query<'a>(
     deployments: &'a [DeploymentRecord],
-    _app_paths: &AppPaths,
+    app_paths: &AppPaths,
     project_path: &Utf8Path,
     agent_id: &AgentId,
     skill_query: &str,
 ) -> Result<&'a DeploymentRecord> {
-    let deployment_root = project_skill_root(project_path, agent_id)?;
+    let deployment_root = project_skill_root(app_paths, project_path, agent_id)?;
     deployments
         .iter()
         .find(|deployment| {
@@ -591,7 +590,7 @@ fn should_ignore_hash_path(path: &Utf8Path) -> bool {
         || file_name.starts_with(".skill-kits")
 }
 
-fn toggle_state(dir: &Utf8Path) -> ToggleState {
+pub(crate) fn toggle_state(dir: &Utf8Path) -> ToggleState {
     let enabled = dir.join("SKILL.md").exists();
     let disabled = dir.join("SKILL.md.disabled").exists();
     match (enabled, disabled) {

@@ -1,3 +1,4 @@
+use assert_cmd::Command as AssertCommand;
 use clap::Parser;
 use serde::Serialize;
 use skill_kits::cli::args::{
@@ -7,6 +8,21 @@ use skill_kits::cli::args::{
 use skill_kits::cli::handlers::exit_code_for_error;
 use skill_kits::cli::output::{format_table, TableColumn};
 use skill_kits::core::{SkillKitsError, SkillSource};
+
+#[test]
+fn clap_defaults_to_status_for_plain_cli() {
+    let cli = Cli::parse_from(["skill-kits"]);
+
+    assert!(cli.command.is_none());
+}
+
+#[test]
+fn clap_parses_top_level_gui_without_command() {
+    let cli = Cli::parse_from(["skill-kits", "--gui"]);
+
+    assert!(cli.gui);
+    assert!(cli.command.is_none());
+}
 
 #[test]
 fn clap_parses_documented_commands() {
@@ -73,7 +89,25 @@ fn clap_parses_project_commands() {
         Cli::parse_from(["skill-kits", "project", "adopt", "--agent", "codex"]).command,
         Some(Command::Project {
             command: ProjectCommand::Adopt(args)
-        }) if args.agent == "codex" && args.project.is_none()
+        }) if args.skill.is_none() && args.agent == "codex" && args.project.is_none()
+    ));
+    assert!(matches!(
+        Cli::parse_from([
+            "skill-kits",
+            "project",
+            "adopt",
+            "frontend-design",
+            "--agent",
+            "codex",
+            "--project",
+            "/tmp/app",
+        ])
+        .command,
+        Some(Command::Project {
+            command: ProjectCommand::Adopt(args)
+        }) if args.skill.as_deref() == Some("frontend-design")
+            && args.agent == "codex"
+            && args.project.as_deref() == Some(camino::Utf8Path::new("/tmp/app"))
     ));
     assert!(matches!(
         Cli::parse_from([
@@ -148,6 +182,25 @@ fn clap_parses_project_commands() {
             })
         }) if skill == "skill" && agent == "codex"
     ));
+}
+
+#[test]
+fn clap_reports_help_and_version() {
+    let help = Cli::try_parse_from(["skill-kits", "--help"]).unwrap_err();
+    assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+
+    let version = Cli::try_parse_from(["skill-kits", "--version"]).unwrap_err();
+    assert_eq!(version.kind(), clap::error::ErrorKind::DisplayVersion);
+}
+
+#[test]
+fn binary_reports_version() {
+    AssertCommand::cargo_bin("skill-kits")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]

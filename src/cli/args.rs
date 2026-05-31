@@ -8,6 +8,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
     about = "Local-first AI Agent Skills manager"
 )]
 pub struct Cli {
+    #[arg(long, help = "Launch the native GUI instead of the CLI")]
+    pub gui: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -74,6 +76,7 @@ pub struct ProjectStatusArgs {
 
 #[derive(Clone, Debug, Args)]
 pub struct ProjectAgentArgs {
+    pub skill: Option<String>,
     #[arg(long)]
     pub agent: String,
     #[arg(long)]

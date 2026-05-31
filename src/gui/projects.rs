@@ -70,10 +70,7 @@ fn inspector_sections(model: &GuiModel) -> Vec<InspectorSection> {
             },
             InspectorSection {
                 title: "Actions".to_string(),
-                lines: vec![
-                    "Enable, disable, redeploy, promote, and remove emit intents.".to_string(),
-                    "This project copy has local changes. Removing it deletes only this deployed Skill, not the Agent skill root.".to_string(),
-                ],
+                lines: action_lines(status),
             },
         ];
     }
@@ -102,6 +99,17 @@ fn inspector_sections(model: &GuiModel) -> Vec<InspectorSection> {
         title: "Empty".to_string(),
         lines: vec!["Open a project to scan project-level Skills.".to_string()],
     }]
+}
+
+fn action_lines(status: &DeploymentStatus) -> Vec<String> {
+    if status.missing_managed_source {
+        return vec!["Available actions: Promote to managed, Remove from project.".to_string()];
+    }
+
+    vec![
+        "Enable, disable, redeploy, promote, and remove emit intents.".to_string(),
+        "This project copy has local changes. Removing it deletes only this deployed Skill, not the Agent skill root.".to_string(),
+    ]
 }
 
 fn toggle_label(toggle: &ToggleState) -> String {

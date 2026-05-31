@@ -11,7 +11,7 @@ use skill_kits::core::{
         ManagedSkill, SkillSource, SkillsRegistry,
     },
 };
-use skill_kits::gui::state::{GuiActionIntent, GuiModel, GuiScope, NavigationView};
+use skill_kits::gui::state::{GuiActionIntent, GuiController, GuiModel, GuiScope, NavigationView};
 use tempfile::TempDir;
 
 fn test_paths(temp_dir: &TempDir) -> AppPaths {
@@ -74,6 +74,21 @@ fn deployment(project: &camino::Utf8Path) -> DeploymentRecord {
 fn write_skill(path: &camino::Utf8Path, body: &str) {
     std::fs::create_dir_all(path).unwrap();
     std::fs::write(path.join("SKILL.md"), body).unwrap();
+}
+
+fn write_config_with_codex_project(paths: &AppPaths, project: &camino::Utf8Path) {
+    write_config(
+        paths,
+        &Config {
+            recent_projects: vec![RecentProject {
+                name: "sample-app".to_string(),
+                path: project.to_path_buf(),
+                last_opened_at: "2026-05-31T00:00:00Z".to_string(),
+            }],
+            ..Config::default()
+        },
+    )
+    .unwrap();
 }
 
 #[test]
@@ -227,6 +242,114 @@ fn actions_emit_intents_without_direct_filesystem_mutation() {
 }
 
 #[test]
+fn controller_executes_project_action_intents_and_reloads_model_state() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+    write_config_with_codex_project(&paths, &project);
+
+    let mut skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    skill.content_hash = hash_skill_dir(&skill.managed_path).unwrap();
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.select_scope(GuiScope::Project(project.clone()));
+    model.select_skill(SkillId::new("frontend-design-a1b2c3d4"));
+    model
+        .request_deploy_selected_skill(AgentId::new("codex"))
+        .unwrap();
+
+    let controller = GuiController::new(paths.clone());
+    assert!(model.execute_next_intent(&controller).unwrap().is_some());
+    assert_eq!(model.pending_intents().len(), 0);
+    assert_eq!(model.deployments.len(), 1);
+    assert!(project
+        .join(".agents/skills/frontend-design/SKILL.md")
+        .exists());
+
+    model.select_deployment(model.deployments[0].id.clone());
+    model.request_disable_selected_deployment().unwrap();
+    assert!(model.execute_next_intent(&controller).unwrap().is_some());
+    assert!(project
+        .join(".agents/skills/frontend-design/SKILL.md.disabled")
+        .exists());
+    assert_eq!(
+        model.selected_deployment_status().unwrap().toggle,
+        skill_kits::core::registry::ToggleState::Disabled
+    );
+
+    model.request_enable_selected_deployment().unwrap();
+    assert!(model.execute_next_intent(&controller).unwrap().is_some());
+    assert!(project
+        .join(".agents/skills/frontend-design/SKILL.md")
+        .exists());
+
+    model.request_remove_selected_deployment(false).unwrap();
+    assert!(model.execute_next_intent(&controller).unwrap().is_some());
+    assert_eq!(model.deployments.len(), 0);
+    assert!(!project.join(".agents/skills/frontend-design").exists());
+}
+
+#[test]
+fn controller_executes_uninstall_intent_and_reloads_global_inventory() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_config(&paths, &Config::default()).unwrap();
+
+    let skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill.clone()],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.select_skill(skill.id.clone());
+    model.request_uninstall_selected_skill().unwrap();
+
+    let controller = GuiController::new(paths.clone());
+    assert!(model.execute_next_intent(&controller).unwrap().is_some());
+
+    assert_eq!(model.pending_intents().len(), 0);
+    assert!(model.skills.is_empty());
+    assert!(!skill.managed_path.exists());
+}
+
+#[test]
+fn gui_view_modules_do_not_use_std_fs_directly() {
+    let view_files = [
+        "src/gui/dashboard.rs",
+        "src/gui/skills.rs",
+        "src/gui/agents.rs",
+        "src/gui/projects.rs",
+    ];
+    for file in view_files {
+        let contents = std::fs::read_to_string(file).unwrap();
+        assert!(
+            !contents.contains("std::fs") && !contents.contains("use std::fs"),
+            "{file} should not use std::fs directly"
+        );
+    }
+}
+
+#[test]
 fn projects_render_rows_show_cached_core_deployment_statuses() {
     let temp_dir = TempDir::new().unwrap();
     let paths = test_paths(&temp_dir);
@@ -344,4 +467,52 @@ fn projects_render_rows_show_cached_core_deployment_statuses() {
         "Missing managed source"
     );
     assert_eq!(row_cells("invalid-toggle-skill")[2], "Invalid");
+}
+
+#[test]
+fn projects_inspector_limits_actions_for_missing_managed_source_deployments() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+
+    let skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    write_config_with_codex_project(&paths, &project);
+
+    deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+    write_skills_registry(&paths, &SkillsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Projects);
+    let deployment_id = model.deployments[0].id.clone();
+    model.select_deployment(deployment_id);
+
+    let renderable = model.renderable_view();
+    let actions = renderable
+        .inspector_sections
+        .iter()
+        .find(|section| section.title == "Actions")
+        .expect("missing Actions inspector section");
+
+    assert_eq!(
+        actions.lines,
+        vec!["Available actions: Promote to managed, Remove from project.".to_string()]
+    );
 }

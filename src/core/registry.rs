@@ -112,6 +112,14 @@ impl Default for DeploymentsRegistry {
     }
 }
 
+#[derive(Debug)]
+pub struct RegistryFiles {
+    pub skills: SkillsRegistry,
+    pub deployments: DeploymentsRegistry,
+    pub write_skills: bool,
+    pub write_deployments: bool,
+}
+
 pub fn read_skills_registry(paths: &AppPaths) -> Result<SkillsRegistry> {
     ensure_app_dirs(paths)?;
     if !paths.skills_registry_file.exists() {
@@ -199,5 +207,27 @@ pub fn update_deployments_registry<R>(
     let mut registry = read_deployments_registry_unlocked(paths)?;
     let result = update(&mut registry)?;
     atomic_write_toml(&paths.deployments_registry_file, &registry)?;
+    Ok(result)
+}
+
+pub fn update_registry_files<R>(
+    paths: &AppPaths,
+    update: impl FnOnce(&mut RegistryFiles) -> Result<R>,
+) -> Result<R> {
+    let _lock = StateLock::acquire(paths)?;
+    ensure_app_dirs(paths)?;
+    let mut registries = RegistryFiles {
+        skills: read_skills_registry_unlocked(paths)?,
+        deployments: read_deployments_registry_unlocked(paths)?,
+        write_skills: false,
+        write_deployments: false,
+    };
+    let result = update(&mut registries)?;
+    if registries.write_skills {
+        atomic_write_toml(&paths.skills_registry_file, &registries.skills)?;
+    }
+    if registries.write_deployments {
+        atomic_write_toml(&paths.deployments_registry_file, &registries.deployments)?;
+    }
     Ok(result)
 }

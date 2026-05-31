@@ -1,6 +1,6 @@
 use crate::cli::args::{
-    Cli, Command, InstallCommand, OutputFormat, ProjectCommand, ProjectRedeployArgs,
-    ProjectRemoveArgs, ProjectSkillAgentArgs, ProjectStatusArgs,
+    Cli, Command, InstallCommand, OutputFormat, ProjectAgentArgs, ProjectCommand,
+    ProjectRedeployArgs, ProjectRemoveArgs, ProjectSkillAgentArgs, ProjectStatusArgs,
 };
 use crate::cli::output::{format_table, to_json, TableColumn};
 use crate::core::adopt::AdoptReport;
@@ -23,6 +23,10 @@ use std::fmt;
 
 pub fn run_cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    run_parsed_cli(cli)
+}
+
+pub fn run_parsed_cli(cli: Cli) -> anyhow::Result<()> {
     match execute(cli) {
         Ok(Some(output)) => {
             println!("{output}");
@@ -111,9 +115,7 @@ fn execute_project(app_paths: &AppPaths, command: ProjectCommand) -> CliResult<O
             let format = args.format;
             render_project_status(project_status(app_paths, args)?, format)
         }
-        ProjectCommand::Adopt(args) => {
-            render_adopt(project_adopt(app_paths, args.agent, args.project)?)
-        }
+        ProjectCommand::Adopt(args) => render_adopt(project_adopt(app_paths, args)?),
         ProjectCommand::Deploy(args) => render_operation(project_deploy(app_paths, args)?),
         ProjectCommand::Enable(args) => render_operation(project_enable(app_paths, args)?),
         ProjectCommand::Disable(args) => render_operation(project_disable(app_paths, args)?),
@@ -294,11 +296,17 @@ fn doctor_rows(issues: &[DoctorIssue]) -> Vec<Vec<TableColumn>> {
 }
 
 fn render_adopt(report: AdoptReport) -> CliResult<Option<String>> {
+    let next_step = if report.conflicts == 0 {
+        "none"
+    } else {
+        "resolve conflicts by importing as a new Skill or skipping"
+    };
     Ok(Some(format_table(
-        &["Imported", "Conflicts"],
+        &["Imported", "Conflicts", "Next Step"],
         &[vec![
             TableColumn::from(report.imported),
             TableColumn::from(report.conflicts),
+            TableColumn::from(next_step),
         ]],
     )))
 }
@@ -319,11 +327,19 @@ fn render_project_status(
                         TableColumn::from(format!("{:?}", deployment.toggle)),
                         TableColumn::from(deployment.outdated),
                         TableColumn::from(deployment.drift),
+                        TableColumn::from(deployment.missing_managed_source),
                     ]
                 })
                 .collect::<Vec<_>>();
             Ok(Some(format_table(
-                &["Skill", "Agent", "Toggle", "Outdated", "Drift"],
+                &[
+                    "Skill",
+                    "Agent",
+                    "Toggle",
+                    "Outdated",
+                    "Drift",
+                    "Missing Managed Source",
+                ],
                 &rows,
             )))
         }
@@ -446,18 +462,19 @@ fn project_status(
         .collect()
 }
 
-fn project_adopt(
-    app_paths: &AppPaths,
-    agent: String,
-    project: Option<Utf8PathBuf>,
-) -> crate::core::Result<AdoptReport> {
-    let project = project_path_or_cwd(project)?;
-    crate::core::adopt::project_adopt_all(crate::core::adopt::ProjectAdoptRequest {
+fn project_adopt(app_paths: &AppPaths, args: ProjectAgentArgs) -> crate::core::Result<AdoptReport> {
+    let project = project_path_or_cwd(args.project)?;
+    let agent_id = AgentId::new(args.agent);
+    let request = crate::core::adopt::ProjectAdoptRequest {
         app_paths,
         project_path: &project,
-        agent_id: &AgentId::new(agent),
-        skill_name: "",
-    })
+        agent_id: &agent_id,
+        skill_name: args.skill.as_deref().unwrap_or(""),
+    };
+    match args.skill {
+        Some(_) => crate::core::adopt::project_adopt(request),
+        None => crate::core::adopt::project_adopt_all(request),
+    }
 }
 
 fn project_deploy(
@@ -563,10 +580,107 @@ fn project_path_or_cwd(project: Option<Utf8PathBuf>) -> crate::core::Result<Utf8
 
 #[cfg(test)]
 mod tests {
-    use super::CliRunError;
+    use super::{project_adopt, render_adopt, render_project_status, CliRunError};
+    use crate::cli::args::{OutputFormat, ProjectAgentArgs};
+    use crate::core::adopt::AdoptReport;
+    use crate::core::ids::{AgentId, SkillId};
+    use crate::core::paths::AppPaths;
+    use crate::core::registry::{
+        read_skills_registry, DeploymentRecord, DeploymentStatus, ToggleState,
+    };
+    use camino::{Utf8Path, Utf8PathBuf};
+    use tempfile::TempDir;
+
+    fn test_paths(temp_dir: &TempDir) -> AppPaths {
+        AppPaths::from_data_root(
+            Utf8PathBuf::from_path_buf(temp_dir.path().join(".skill-kits")).unwrap(),
+        )
+    }
+
+    fn write_skill(path: &Utf8Path, body: &str) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("SKILL.md"), body).unwrap();
+    }
 
     #[test]
     fn doctor_error_code_is_reserved() {
         assert_eq!(CliRunError::DoctorFoundErrors.exit_code(), 5);
+    }
+
+    #[test]
+    fn adopt_conflict_output_includes_next_step() {
+        let output = render_adopt(AdoptReport {
+            imported: 1,
+            conflicts: 2,
+        })
+        .unwrap()
+        .unwrap();
+
+        assert!(output.contains("Next Step"));
+        assert!(output.contains("resolve conflicts"));
+    }
+
+    #[test]
+    fn project_adopt_with_skill_only_adopts_that_skill() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = test_paths(&temp_dir);
+        let project = Utf8PathBuf::from_path_buf(temp_dir.path().join("project")).unwrap();
+        write_skill(
+            &project.join(".agents/skills/frontend-design"),
+            "# Frontend\n",
+        );
+        write_skill(&project.join(".agents/skills/other-skill"), "# Other\n");
+
+        let report = project_adopt(
+            &paths,
+            ProjectAgentArgs {
+                skill: Some("frontend-design".to_string()),
+                agent: "codex".to_string(),
+                project: Some(project),
+            },
+        )
+        .unwrap();
+
+        let registry = read_skills_registry(&paths).unwrap();
+        let adopted_names = registry
+            .skills
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(report.imported, 1);
+        assert_eq!(adopted_names, vec!["frontend-design".to_string()]);
+    }
+
+    #[test]
+    fn project_status_table_reports_missing_managed_source() {
+        let output = render_project_status(
+            vec![DeploymentStatus {
+                record: DeploymentRecord {
+                    id: "deployment".to_string(),
+                    skill_id: SkillId::new("missing"),
+                    agent_id: AgentId::new("codex"),
+                    project_name: "project".to_string(),
+                    project_path: "/tmp/project".into(),
+                    deployment_path: "/tmp/project/.agents/skills/missing".into(),
+                    skill_name: "missing".to_string(),
+                    baseline_hash: "baseline".to_string(),
+                    deployed_from_hash: "deployed".to_string(),
+                    created_at: "2026-05-31T00:00:00Z".to_string(),
+                    updated_at: "2026-05-31T00:00:00Z".to_string(),
+                },
+                toggle: ToggleState::Enabled,
+                current_hash: Some("baseline".to_string()),
+                drift: false,
+                outdated: false,
+                missing_managed_source: true,
+            }],
+            OutputFormat::Table,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(output.contains("Missing Managed Source"));
+        assert!(output.contains("true"));
     }
 }
