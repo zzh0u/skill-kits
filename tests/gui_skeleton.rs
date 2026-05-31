@@ -8,11 +8,14 @@ use skill_kits::core::{
     project::{deploy_project_skill, ProjectDeployRequest},
     registry::{
         write_deployments_registry, write_skills_registry, DeploymentRecord, DeploymentsRegistry,
-        ManagedSkill, SkillSource, SkillsRegistry,
+        ManagedSkill, SkillMetadata, SkillSource, SkillsRegistry,
     },
 };
-use skill_kits::gui::state::{GuiActionIntent, GuiController, GuiModel, GuiScope, NavigationView};
-use skill_kits::gui::{project_actions, ProjectAction};
+use skill_kits::gui::state::{
+    GuiActionIntent, GuiController, GuiModel, GuiScope, NavigationView, ProjectSummary,
+    DRIFT_REMOVE_CONFIRMATION_MESSAGE,
+};
+use skill_kits::gui::{agent_actions, project_actions, AgentAction, ProjectAction};
 use tempfile::TempDir;
 
 fn test_paths(temp_dir: &TempDir) -> AppPaths {
@@ -38,6 +41,20 @@ fn managed_skill(paths: &AppPaths) -> ManagedSkill {
         created_at: "2026-05-31T00:00:00Z".to_string(),
         updated_at: "2026-05-31T00:00:00Z".to_string(),
     }
+}
+
+fn managed_skill_with_metadata(paths: &AppPaths) -> ManagedSkill {
+    let mut skill = managed_skill(paths);
+    skill.content_hash = "metadata-hash".to_string();
+    skill.updated_at = "2026-05-31T12:34:56Z".to_string();
+    skill.metadata = Some(SkillMetadata {
+        title: Some("Frontend Design Systems".to_string()),
+        description: Some(
+            "Builds polished interface systems from existing product context.".to_string(),
+        ),
+        frontmatter: toml::value::Table::new(),
+    });
+    skill
 }
 
 fn managed_skill_with_name(paths: &AppPaths, name: &str) -> ManagedSkill {
@@ -143,6 +160,65 @@ fn each_navigation_view_loads_from_app_paths_model() {
 }
 
 #[test]
+fn selecting_render_rows_updates_view_selection_without_filesystem_mutation() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+
+    let frontend = managed_skill(&paths);
+    write_skill(&frontend.managed_path, "# Frontend Design\n");
+    let second = managed_skill_with_name(&paths, "reviewer");
+    write_skill(&second.managed_path, "# Reviewer\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![frontend, second.clone()],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    write_config_with_codex_project(&paths, &project);
+    deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Skills);
+    assert!(model.select_render_row(second.id.as_str()));
+    assert_eq!(
+        model.request_scan_selected_skill(),
+        Some(GuiActionIntent::ScanSkill {
+            skill_id: second.id.clone(),
+        })
+    );
+
+    model.navigate(NavigationView::Agents);
+    assert!(model.select_render_row("codex"));
+    assert_eq!(model.selected_agent().unwrap().id, AgentId::new("codex"));
+    assert!(!model.select_render_row("custom-agents"));
+
+    model.navigate(NavigationView::Projects);
+    let deployment_id = model.deployments[0].id.clone();
+    assert!(model.select_render_row(&deployment_id));
+    assert_eq!(model.selected_deployment().unwrap().id, deployment_id);
+    assert_eq!(
+        model.request_disable_selected_deployment(),
+        Some(GuiActionIntent::DisableDeployment {
+            project_path: project,
+            agent_id: AgentId::new("codex"),
+            skill_name: "frontend-design".to_string(),
+        })
+    );
+}
+
+#[test]
 fn startup_loads_registry_and_recent_project_summaries_without_recursive_project_scan() {
     let temp_dir = TempDir::new().unwrap();
     let paths = test_paths(&temp_dir);
@@ -179,6 +255,143 @@ fn startup_loads_registry_and_recent_project_summaries_without_recursive_project
         .project_summaries
         .iter()
         .any(|summary| summary.discovered_unmanaged_count > 0));
+}
+
+#[test]
+fn projects_onboarding_renders_adopt_all_for_discovered_unmanaged_summary() {
+    let project = Utf8PathBuf::from("/tmp/sample-app");
+    let mut model = GuiModel::default();
+    model.navigate(NavigationView::Projects);
+    model.select_project(project.clone());
+    model.project_summaries.push(ProjectSummary {
+        name: "sample-app".to_string(),
+        path: project.clone(),
+        deployment_count: 0,
+        discovered_unmanaged_count: 2,
+    });
+
+    let renderable = model.renderable_view();
+    let onboarding = renderable
+        .inspector_sections
+        .iter()
+        .find(|section| section.title == "Onboarding")
+        .expect("missing Onboarding inspector section");
+
+    assert_eq!(
+        onboarding.lines,
+        vec![
+            "2 discovered project Skill(s) are available to adopt.".to_string(),
+            "Adopt all emits a GUI intent; no Skill is adopted automatically.".to_string(),
+        ]
+    );
+    assert_eq!(project_actions(&model), vec![ProjectAction::AdoptAll]);
+    assert_eq!(
+        model.request_adopt_all_discovered_for_selected_project(),
+        Some(GuiActionIntent::ProjectAdoptAll {
+            project_path: project,
+        })
+    );
+}
+
+#[test]
+fn selecting_project_clears_stale_deployment_selection_for_onboarding() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    let onboarding_project = project_path(&temp_dir, "onboarding-app");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&onboarding_project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+
+    let skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    write_config(
+        &paths,
+        &Config {
+            recent_projects: vec![
+                RecentProject {
+                    name: "sample-app".to_string(),
+                    path: project.clone(),
+                    last_opened_at: "2026-05-31T00:00:00Z".to_string(),
+                },
+                RecentProject {
+                    name: "onboarding-app".to_string(),
+                    path: onboarding_project.clone(),
+                    last_opened_at: "2026-05-31T00:00:00Z".to_string(),
+                },
+            ],
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Projects);
+    let deployment_id = model.deployments[0].id.clone();
+    model.select_deployment(deployment_id);
+    model
+        .project_summaries
+        .iter_mut()
+        .find(|summary| summary.path == onboarding_project)
+        .unwrap()
+        .discovered_unmanaged_count = 2;
+
+    model.select_scope(GuiScope::Project(onboarding_project.clone()));
+
+    assert_eq!(model.selected_deployment_status(), None);
+    assert_eq!(project_actions(&model), vec![ProjectAction::AdoptAll]);
+    let renderable = model.renderable_view();
+    let onboarding = renderable
+        .inspector_sections
+        .iter()
+        .find(|section| section.title == "Onboarding")
+        .expect("missing Onboarding inspector section");
+    assert_eq!(
+        onboarding.lines,
+        vec![
+            "2 discovered project Skill(s) are available to adopt.".to_string(),
+            "Adopt all emits a GUI intent; no Skill is adopted automatically.".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn project_adopt_all_placeholder_intent_is_noop_for_controller() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    ensure_app_dirs(&paths).unwrap();
+    std::fs::create_dir_all(project.join(".agents/skills/unmanaged")).unwrap();
+    std::fs::write(
+        project.join(".agents/skills/unmanaged/SKILL.md"),
+        "# Unmanaged\n",
+    )
+    .unwrap();
+
+    let controller = GuiController::new(paths);
+    controller
+        .execute(&GuiActionIntent::ProjectAdoptAll {
+            project_path: project.clone(),
+        })
+        .unwrap();
+
+    assert!(project.join(".agents/skills/unmanaged/SKILL.md").exists());
 }
 
 #[test]
@@ -240,6 +453,75 @@ fn actions_emit_intents_without_direct_filesystem_mutation() {
     );
     assert_eq!(model.pending_intents().len(), 2);
     assert!(!project.join(".custom/skills/frontend-design").exists());
+}
+
+#[test]
+fn agent_actions_emit_intents_without_direct_filesystem_mutation() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+
+    let custom_agent = AgentConfig {
+        id: AgentId::new("custom"),
+        label: "Custom".to_string(),
+        kind: AgentKind::Custom,
+        global_skill_dirs: Vec::new(),
+        project_skill_dirs: vec![".custom/skills".into()],
+        enabled: true,
+    };
+    write_config(
+        &paths,
+        &Config {
+            agents: vec![custom_agent],
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    write_skills_registry(&paths, &SkillsRegistry::default()).unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    let config_before = std::fs::read_to_string(&paths.config_file).unwrap();
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.select_agent(AgentId::new("custom"));
+
+    let edit_intent = model.request_edit_selected_agent().unwrap();
+    assert_eq!(
+        edit_intent,
+        GuiActionIntent::EditAgent {
+            agent_id: AgentId::new("custom"),
+        }
+    );
+    let add_intent = model.request_add_custom_agent().unwrap();
+    assert_eq!(add_intent, GuiActionIntent::AddCustomAgent);
+
+    let controller = GuiController::new(paths.clone());
+    controller.execute(&edit_intent).unwrap();
+    controller.execute(&add_intent).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&paths.config_file).unwrap(),
+        config_before
+    );
+}
+
+#[test]
+fn agents_controls_offer_edit_selected_and_add_custom_actions() {
+    let mut model = GuiModel::default();
+    assert_eq!(agent_actions(&model), vec![AgentAction::AddCustom]);
+
+    model.agents.push(AgentConfig {
+        id: AgentId::new("codex"),
+        label: "Codex".to_string(),
+        kind: AgentKind::BuiltIn,
+        global_skill_dirs: Vec::new(),
+        project_skill_dirs: vec![".agents/skills".into()],
+        enabled: true,
+    });
+    model.select_agent(AgentId::new("codex"));
+
+    assert_eq!(
+        agent_actions(&model),
+        vec![AgentAction::EditSelected, AgentAction::AddCustom]
+    );
 }
 
 #[test]
@@ -305,6 +587,108 @@ fn redeploy_actions_emit_selected_deployment_intents_without_direct_filesystem_m
         })
     );
     assert_eq!(model.pending_intents().len(), 3);
+}
+
+#[test]
+fn drifted_remove_first_click_records_confirmation_without_queueing_remove() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+
+    let skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    write_config_with_codex_project(&paths, &project);
+
+    deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+    std::fs::write(
+        project.join(".agents/skills/frontend-design/local.txt"),
+        "project edit\n",
+    )
+    .unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    let deployment_id = model.deployments[0].id.clone();
+    model.select_deployment(deployment_id.clone());
+
+    assert_eq!(model.request_remove_selected_deployment(false), None);
+    assert_eq!(model.pending_intents(), &[]);
+    assert_eq!(
+        model.pending_remove_confirmation(),
+        Some(deployment_id.as_str())
+    );
+    assert_eq!(
+        model.pending_remove_confirmation_message(),
+        Some(DRIFT_REMOVE_CONFIRMATION_MESSAGE)
+    );
+}
+
+#[test]
+fn confirm_drifted_remove_queues_force_remove_intent() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+
+    let skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    write_config_with_codex_project(&paths, &project);
+
+    deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+    std::fs::write(
+        project.join(".agents/skills/frontend-design/local.txt"),
+        "project edit\n",
+    )
+    .unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    let deployment_id = model.deployments[0].id.clone();
+    model.select_deployment(deployment_id.clone());
+    assert_eq!(model.request_remove_selected_deployment(false), None);
+
+    assert_eq!(
+        model.confirm_pending_remove(),
+        Some(GuiActionIntent::RemoveDeployment {
+            project_path: project,
+            agent_id: AgentId::new("codex"),
+            skill_name: "frontend-design".to_string(),
+            force: true,
+        })
+    );
+    assert_eq!(model.pending_remove_confirmation(), None);
+    assert_eq!(model.pending_intents().len(), 1);
 }
 
 #[test]
@@ -458,6 +842,112 @@ fn controller_executes_uninstall_intent_and_reloads_global_inventory() {
     assert_eq!(model.pending_intents().len(), 0);
     assert!(model.skills.is_empty());
     assert!(!skill.managed_path.exists());
+}
+
+#[test]
+fn skills_inspector_renders_metadata_and_registry_metadata_from_loaded_model() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_config(&paths, &Config::default()).unwrap();
+
+    let skill = managed_skill_with_metadata(&paths);
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill.clone()],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Skills);
+    model.select_skill(skill.id.clone());
+
+    let renderable = model.renderable_view();
+    let metadata = renderable
+        .inspector_sections
+        .iter()
+        .find(|section| section.title == "Metadata")
+        .expect("missing Metadata inspector section");
+    assert_eq!(
+        metadata.lines,
+        vec![
+            "Title Frontend Design Systems".to_string(),
+            "Description Builds polished interface systems from existing product context."
+                .to_string(),
+        ]
+    );
+
+    let registry_metadata = renderable
+        .inspector_sections
+        .iter()
+        .find(|section| section.title == "Registry Metadata")
+        .expect("missing Registry Metadata inspector section");
+    assert_eq!(
+        registry_metadata.lines,
+        vec![
+            "ID frontend-design-a1b2c3d4".to_string(),
+            "Hash metadata-hash".to_string(),
+            "Updated 2026-05-31T12:34:56Z".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn skills_inspector_renders_project_deployments_from_loaded_model() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+    write_config_with_codex_project(&paths, &project);
+
+    let mut skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    skill.content_hash = hash_skill_dir(&skill.managed_path).unwrap();
+    let deployed_path = project.join(".agents/skills/frontend-design");
+    write_skill(&deployed_path, "# Frontend Design\n");
+    let mut record = deployment(&project);
+    record.baseline_hash = hash_skill_dir(&deployed_path).unwrap();
+    record.deployed_from_hash = skill.content_hash.clone();
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill.clone()],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(
+        &paths,
+        &DeploymentsRegistry {
+            version: 1,
+            deployments: vec![record],
+        },
+    )
+    .unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Skills);
+    model.select_skill(skill.id.clone());
+
+    let renderable = model.renderable_view();
+    let deployments = renderable
+        .inspector_sections
+        .iter()
+        .find(|section| section.title == "Project Deployments")
+        .expect("missing Project Deployments inspector section");
+
+    assert_eq!(
+        deployments.lines,
+        vec![format!(
+            "sample-app | codex | Enabled | {}",
+            project.join(".agents/skills/frontend-design")
+        )]
+    );
 }
 
 #[test]

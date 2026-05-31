@@ -19,6 +19,9 @@ use crate::core::{
 use camino::Utf8PathBuf;
 use egui::Color32;
 
+pub const DRIFT_REMOVE_CONFIRMATION_MESSAGE: &str =
+    "This project copy has local changes. Removing it deletes only this deployed Skill, not the Agent skill root.";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NavigationView {
     Dashboard,
@@ -83,6 +86,9 @@ pub enum GuiActionIntent {
         promote: bool,
     },
     RefreshProject {
+        project_path: Utf8PathBuf,
+    },
+    ProjectAdoptAll {
         project_path: Utf8PathBuf,
     },
     OpenProject {
@@ -192,6 +198,7 @@ impl GuiController {
                 })?;
             }
             GuiActionIntent::RefreshProject { .. }
+            | GuiActionIntent::ProjectAdoptAll { .. }
             | GuiActionIntent::OpenProject { .. }
             | GuiActionIntent::EditAgent { .. }
             | GuiActionIntent::AddCustomAgent => {}
@@ -253,6 +260,7 @@ pub struct GuiModel {
     selected_agent: Option<AgentId>,
     selected_project: Option<Utf8PathBuf>,
     selected_deployment: Option<String>,
+    pending_remove_confirmation: Option<String>,
     pending_intents: Vec<GuiActionIntent>,
 }
 
@@ -314,6 +322,7 @@ impl GuiModel {
             selected_agent: None,
             selected_project,
             selected_deployment: None,
+            pending_remove_confirmation: None,
             pending_intents: Vec::new(),
         })
     }
@@ -325,6 +334,8 @@ impl GuiModel {
     pub fn select_scope(&mut self, scope: GuiScope) {
         if let GuiScope::Project(path) = &scope {
             self.selected_project = Some(path.clone());
+            self.selected_deployment = None;
+            self.pending_remove_confirmation = None;
         }
         self.active_scope = scope;
     }
@@ -339,14 +350,69 @@ impl GuiModel {
 
     pub fn select_project(&mut self, project_path: Utf8PathBuf) {
         self.selected_project = Some(project_path);
+        self.selected_deployment = None;
+        self.pending_remove_confirmation = None;
     }
 
     pub fn select_deployment(&mut self, deployment_id: String) {
+        if self
+            .pending_remove_confirmation
+            .as_ref()
+            .is_some_and(|pending| pending != &deployment_id)
+        {
+            self.pending_remove_confirmation = None;
+        }
         self.selected_deployment = Some(deployment_id);
+    }
+
+    pub fn select_render_row(&mut self, row_id: &str) -> bool {
+        match self.active_view {
+            NavigationView::Dashboard => false,
+            NavigationView::Skills => {
+                if self.skills.iter().any(|skill| skill.id.as_str() == row_id) {
+                    self.select_skill(SkillId::new(row_id));
+                    true
+                } else {
+                    false
+                }
+            }
+            NavigationView::Agents => {
+                if self.agents.iter().any(|agent| agent.id.as_str() == row_id) {
+                    self.select_agent(AgentId::new(row_id));
+                    true
+                } else {
+                    false
+                }
+            }
+            NavigationView::Projects => {
+                if let Some(project_path) = self
+                    .deployments
+                    .iter()
+                    .find(|deployment| deployment.id == row_id)
+                    .map(|deployment| deployment.project_path.clone())
+                {
+                    self.selected_project = Some(project_path);
+                    self.select_deployment(row_id.to_string());
+                    true
+                } else {
+                    false
+                }
+            }
+        }
     }
 
     pub fn pending_intents(&self) -> &[GuiActionIntent] {
         &self.pending_intents
+    }
+
+    pub fn pending_remove_confirmation(&self) -> Option<&str> {
+        self.pending_remove_confirmation.as_deref()
+    }
+
+    pub fn pending_remove_confirmation_message(&self) -> Option<&'static str> {
+        self.pending_remove_confirmation
+            .as_ref()
+            .map(|_| DRIFT_REMOVE_CONFIRMATION_MESSAGE)
     }
 
     pub fn request_scan_selected_skill(&mut self) -> Option<GuiActionIntent> {
@@ -374,6 +440,25 @@ impl GuiModel {
         self.push_intent(GuiActionIntent::RefreshProject { project_path })
     }
 
+    pub fn request_adopt_all_discovered_for_selected_project(&mut self) -> Option<GuiActionIntent> {
+        let project = self.selected_project_summary()?;
+        if project.discovered_unmanaged_count == 0 {
+            return None;
+        }
+        self.push_intent(GuiActionIntent::ProjectAdoptAll {
+            project_path: project.path.clone(),
+        })
+    }
+
+    pub fn request_edit_selected_agent(&mut self) -> Option<GuiActionIntent> {
+        let agent_id = self.selected_agent.clone()?;
+        self.push_intent(GuiActionIntent::EditAgent { agent_id })
+    }
+
+    pub fn request_add_custom_agent(&mut self) -> Option<GuiActionIntent> {
+        self.push_intent(GuiActionIntent::AddCustomAgent)
+    }
+
     pub fn request_enable_selected_deployment(&mut self) -> Option<GuiActionIntent> {
         let deployment = self.selected_deployment()?.clone();
         self.push_intent(GuiActionIntent::EnableDeployment {
@@ -393,13 +478,27 @@ impl GuiModel {
     }
 
     pub fn request_remove_selected_deployment(&mut self, force: bool) -> Option<GuiActionIntent> {
+        if !force {
+            let status = self.selected_deployment_status()?;
+            if status.drift {
+                self.pending_remove_confirmation = Some(status.record.id.clone());
+                return None;
+            }
+        }
         let deployment = self.selected_deployment()?.clone();
+        self.pending_remove_confirmation = None;
         self.push_intent(GuiActionIntent::RemoveDeployment {
             project_path: deployment.project_path,
             agent_id: deployment.agent_id,
             skill_name: deployment.skill_name,
             force,
         })
+    }
+
+    pub fn confirm_pending_remove(&mut self) -> Option<GuiActionIntent> {
+        let deployment_id = self.pending_remove_confirmation.clone()?;
+        self.selected_deployment = Some(deployment_id);
+        self.request_remove_selected_deployment(true)
     }
 
     pub fn request_redeploy_selected_deployment(&mut self) -> Option<GuiActionIntent> {
@@ -443,6 +542,8 @@ impl GuiModel {
         let selected_agent = self.selected_agent.clone();
         let selected_project = self.selected_project.clone();
         let selected_deployment = self.selected_deployment.clone();
+        let pending_remove_confirmation = self.pending_remove_confirmation.clone();
+        let pending_intents = self.pending_intents.clone();
         controller.execute(&intent)?;
         *self = Self::load(controller.paths())?;
         self.active_view = active_view;
@@ -466,6 +567,12 @@ impl GuiModel {
                 .iter()
                 .any(|deployment| deployment.id == *selected)
         });
+        self.pending_remove_confirmation = pending_remove_confirmation.filter(|pending| {
+            self.deployments
+                .iter()
+                .any(|deployment| deployment.id == *pending)
+        });
+        self.pending_intents = pending_intents;
         Ok(Some(intent))
     }
 
@@ -553,6 +660,7 @@ impl Default for GuiModel {
             selected_agent: None,
             selected_project: None,
             selected_deployment: None,
+            pending_remove_confirmation: None,
             pending_intents: Vec::new(),
         }
     }

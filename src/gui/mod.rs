@@ -6,10 +6,13 @@ pub mod state;
 
 use crate::core::paths::AppPaths;
 use eframe::egui;
-use state::{GuiModel, GuiScope, NavigationView, RenderableView, UiColors};
+use state::{
+    GuiModel, GuiScope, NavigationView, RenderableView, UiColors, DRIFT_REMOVE_CONFIRMATION_MESSAGE,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectAction {
+    AdoptAll,
     Deploy,
     Enable,
     Disable,
@@ -19,7 +22,27 @@ pub enum ProjectAction {
     Remove,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentAction {
+    EditSelected,
+    AddCustom,
+}
+
+impl AgentAction {
+    const WITH_SELECTION: [Self; 2] = [Self::EditSelected, Self::AddCustom];
+    const EMPTY: [Self; 1] = [Self::AddCustom];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::EditSelected => "Edit path",
+            Self::AddCustom => "Add custom",
+        }
+    }
+}
+
 impl ProjectAction {
+    const ONBOARDING: [Self; 1] = [Self::AdoptAll];
+
     const NORMAL: [Self; 7] = [
         Self::Deploy,
         Self::Enable,
@@ -34,6 +57,7 @@ impl ProjectAction {
 
     fn label(self) -> &'static str {
         match self {
+            Self::AdoptAll => "Adopt all",
             Self::Deploy => "Deploy",
             Self::Enable => "Enable",
             Self::Disable => "Disable",
@@ -45,7 +69,23 @@ impl ProjectAction {
     }
 }
 
+pub fn agent_actions(model: &GuiModel) -> Vec<AgentAction> {
+    if model.selected_agent().is_some() {
+        AgentAction::WITH_SELECTION.to_vec()
+    } else {
+        AgentAction::EMPTY.to_vec()
+    }
+}
+
 pub fn project_actions(model: &GuiModel) -> Vec<ProjectAction> {
+    if model
+        .selected_project_summary()
+        .is_some_and(|project| project.discovered_unmanaged_count > 0)
+        && model.selected_deployment_status().is_none()
+    {
+        return ProjectAction::ONBOARDING.to_vec();
+    }
+
     if model
         .selected_deployment_status()
         .is_some_and(|status| status.missing_managed_source)
@@ -170,7 +210,7 @@ impl eframe::App for SkillKitsGuiApp {
             .frame(egui::Frame::none().fill(self.colors.canvas))
             .show(ctx, |ui| {
                 let renderable = self.model.renderable_view();
-                render_main(ui, &renderable, self.colors);
+                render_main(ui, &mut self.model, &renderable, self.colors);
             });
     }
 }
@@ -194,7 +234,12 @@ fn apply_dark_theme(ctx: &egui::Context, colors: UiColors) {
     ctx.set_visuals(visuals);
 }
 
-fn render_main(ui: &mut egui::Ui, renderable: &RenderableView, colors: UiColors) {
+fn render_main(
+    ui: &mut egui::Ui,
+    model: &mut GuiModel,
+    renderable: &RenderableView,
+    colors: UiColors,
+) {
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.heading(egui::RichText::new(&renderable.title).size(20.0));
@@ -218,8 +263,16 @@ fn render_main(ui: &mut egui::Ui, renderable: &RenderableView, colors: UiColors)
             ui.end_row();
 
             for row in &renderable.main_rows {
-                for cell in &row.cells {
-                    ui.label(cell);
+                let mut row_clicked = false;
+                for (index, cell) in row.cells.iter().enumerate() {
+                    let response = ui.selectable_label(false, cell);
+                    if index == 0 {
+                        response.clone().on_hover_text("Select row");
+                    }
+                    row_clicked |= response.clicked();
+                }
+                if row_clicked {
+                    model.select_render_row(&row.id);
                 }
                 ui.end_row();
             }
@@ -268,6 +321,18 @@ fn render_action_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCol
             });
         }
         NavigationView::Projects => {
+            if model.pending_remove_confirmation().is_some() {
+                ui.label(
+                    egui::RichText::new(DRIFT_REMOVE_CONFIRMATION_MESSAGE).color(colors.warning),
+                );
+                if ui
+                    .button(egui::RichText::new("Confirm Remove").color(colors.danger))
+                    .clicked()
+                {
+                    let _ = model.confirm_pending_remove();
+                }
+                ui.add_space(4.0);
+            }
             for actions in project_actions(model).chunks(3) {
                 ui.horizontal(|ui| {
                     for action in actions {
@@ -276,7 +341,29 @@ fn render_action_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCol
                 });
             }
         }
-        NavigationView::Dashboard | NavigationView::Agents => {}
+        NavigationView::Agents => {
+            ui.horizontal(|ui| {
+                for action in agent_actions(model) {
+                    render_agent_action_button(ui, model, action);
+                }
+            });
+        }
+        NavigationView::Dashboard => {}
+    }
+}
+
+fn render_agent_action_button(ui: &mut egui::Ui, model: &mut GuiModel, action: AgentAction) {
+    if !ui.button(action.label()).clicked() {
+        return;
+    }
+
+    match action {
+        AgentAction::EditSelected => {
+            let _ = model.request_edit_selected_agent();
+        }
+        AgentAction::AddCustom => {
+            let _ = model.request_add_custom_agent();
+        }
     }
 }
 
@@ -299,6 +386,9 @@ fn render_project_action_button(
     }
 
     match action {
+        ProjectAction::AdoptAll => {
+            let _ = model.request_adopt_all_discovered_for_selected_project();
+        }
         ProjectAction::Deploy => {
             if let Some(agent_id) = model.agents.first().map(|agent| agent.id.clone()) {
                 let _ = model.request_deploy_selected_skill(agent_id);

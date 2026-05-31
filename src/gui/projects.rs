@@ -50,10 +50,7 @@ pub fn renderable(model: &GuiModel) -> RenderableView {
 }
 
 fn inspector_sections(model: &GuiModel) -> Vec<InspectorSection> {
-    if let Some(status) = model
-        .selected_deployment_status()
-        .or_else(|| model.deployment_statuses.first())
-    {
+    if let Some(status) = model.selected_deployment_status() {
         let deployment = &status.record;
         return vec![
             InspectorSection {
@@ -83,10 +80,7 @@ fn inspector_sections(model: &GuiModel) -> Vec<InspectorSection> {
             },
             InspectorSection {
                 title: "Onboarding".to_string(),
-                lines: vec![
-                    "No startup project scan has run.".to_string(),
-                    "Refresh emits an explicit project scan intent.".to_string(),
-                ],
+                lines: onboarding_lines(project),
             },
             InspectorSection {
                 title: "Git Ignore Guidance".to_string(),
@@ -99,6 +93,23 @@ fn inspector_sections(model: &GuiModel) -> Vec<InspectorSection> {
         title: "Empty".to_string(),
         lines: vec!["Open a project to scan project-level Skills.".to_string()],
     }]
+}
+
+fn onboarding_lines(project: &crate::gui::state::ProjectSummary) -> Vec<String> {
+    if project.discovered_unmanaged_count > 0 {
+        return vec![
+            format!(
+                "{} discovered project Skill(s) are available to adopt.",
+                project.discovered_unmanaged_count
+            ),
+            "Adopt all emits a GUI intent; no Skill is adopted automatically.".to_string(),
+        ];
+    }
+
+    vec![
+        "No startup project scan has run.".to_string(),
+        "Refresh emits an explicit project scan intent.".to_string(),
+    ]
 }
 
 fn action_lines(status: &DeploymentStatus) -> Vec<String> {
