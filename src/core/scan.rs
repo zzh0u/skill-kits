@@ -59,8 +59,18 @@ fn is_scannable_file(path: &Utf8Path) -> bool {
 fn scan_markdown(path: &Utf8Path, text: &str) -> Vec<RiskFinding> {
     let mut findings = Vec::new();
     let lines: Vec<_> = text.lines().collect();
+    let file_is_shell = is_shell_file(path);
+    let mut in_shell_fence = false;
+
     for (idx, line) in lines.iter().enumerate() {
+        if let Some(shell_fence) = shell_fence_state(line) {
+            in_shell_fence = shell_fence;
+            continue;
+        }
+
         let lower = line.to_ascii_lowercase();
+        let shell_context = file_is_shell || in_shell_fence;
+
         if (lower.contains("curl") || lower.contains("wget"))
             && lower.contains('|')
             && lower.contains("sh")
@@ -125,12 +135,7 @@ fn scan_markdown(path: &Utf8Path, text: &str) -> Vec<RiskFinding> {
                 "network fetch instruction",
             ));
         }
-        if lower.contains("./")
-            || lower.contains("../")
-            || lower.contains(".exe")
-            || lower.contains("bash <(")
-            || lower.contains("sh <(")
-        {
+        if is_unknown_binary_execution(line, shell_context) {
             findings.push(finding(
                 path,
                 idx,
@@ -142,6 +147,121 @@ fn scan_markdown(path: &Utf8Path, text: &str) -> Vec<RiskFinding> {
     }
 
     findings
+}
+
+fn is_shell_file(path: &Utf8Path) -> bool {
+    matches!(
+        path.extension().unwrap_or_default(),
+        "sh" | "bash" | "zsh" | "fish"
+    )
+}
+
+fn shell_fence_state(line: &str) -> Option<bool> {
+    let trimmed = line.trim_start();
+    let marker = if trimmed.starts_with("```") {
+        "```"
+    } else if trimmed.starts_with("~~~") {
+        "~~~"
+    } else {
+        return None;
+    };
+    let language = trimmed
+        .trim_start_matches(marker)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if language.is_empty() {
+        Some(false)
+    } else {
+        Some(matches!(
+            language.as_str(),
+            "sh" | "shell" | "bash" | "zsh" | "fish" | "console" | "terminal"
+        ))
+    }
+}
+
+fn is_unknown_binary_execution(line: &str, shell_context: bool) -> bool {
+    if !shell_context {
+        return false;
+    }
+
+    let mut words = line.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        let word = trim_shell_token(word);
+        let lower = word.to_ascii_lowercase();
+
+        if is_shell_prompt(word) || is_env_assignment(word) || is_command_wrapper(&lower) {
+            continue;
+        }
+
+        if lower.starts_with("bash<(")
+            || lower.starts_with("bash <(")
+            || lower.starts_with("sh<(")
+            || lower.starts_with("sh <(")
+        {
+            return true;
+        }
+
+        if is_unknown_binary_token(&lower) {
+            return true;
+        }
+
+        if lower == "bash" || lower == "sh" {
+            return words
+                .peek()
+                .map(|next| trim_shell_token(next).starts_with("<("))
+                .unwrap_or(false);
+        }
+
+        return false;
+    }
+
+    false
+}
+
+fn trim_shell_token(token: &str) -> &str {
+    token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\'' | '`' | ';' | '&' | '|' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
+    })
+}
+
+fn is_shell_prompt(token: &str) -> bool {
+    matches!(token, "$" | "#" | "%" | ">")
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, value)) = token.split_once('=') else {
+        return false;
+    };
+
+    !name.is_empty()
+        && !value.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+}
+
+fn is_command_wrapper(token: &str) -> bool {
+    matches!(
+        token,
+        "sudo" | "env" | "command" | "exec" | "nohup" | "time" | "wine"
+    )
+}
+
+fn is_unknown_binary_token(token: &str) -> bool {
+    token.starts_with("./")
+        || token.starts_with("../")
+        || token.ends_with(".exe")
+        || token.contains(".exe/")
 }
 
 fn finding(

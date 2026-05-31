@@ -78,12 +78,19 @@ pub fn resolve_project_scope(project_path: Option<&Utf8Path>) -> Result<ProjectS
             path: path.to_path_buf(),
         });
     }
+    let path = std::fs::canonicalize(&path)
+        .map_err(SkillKitsError::from)
+        .and_then(|path| {
+            Utf8PathBuf::from_path_buf(path).map_err(|path| SkillKitsError::ProjectNotFound {
+                path: Utf8PathBuf::from(path.to_string_lossy().to_string()),
+            })
+        })?;
     Ok(ProjectScope {
         name: path
             .file_name()
             .map(|name| name.to_string())
             .unwrap_or_else(|| path.to_string()),
-        path: path.to_path_buf(),
+        path,
     })
 }
 

@@ -6,8 +6,8 @@ use crate::core::{
     paths::AppPaths,
     project::{
         deploy_project_skill, disable_project_skill, enable_project_skill,
-        project_deployment_status, remove_project_skill, ProjectDeployRequest,
-        ProjectRemoveRequest, ProjectSkillRequest,
+        project_deployment_status, redeploy_project_skill, remove_project_skill,
+        ProjectDeployRequest, ProjectRedeployRequest, ProjectRemoveRequest, ProjectSkillRequest,
     },
     registry::{
         read_deployments_registry, read_skills_registry, DeploymentRecord, DeploymentStatus,
@@ -74,6 +74,13 @@ pub enum GuiActionIntent {
         agent_id: AgentId,
         skill_name: String,
         force: bool,
+    },
+    RedeployDeployment {
+        project_path: Utf8PathBuf,
+        agent_id: AgentId,
+        skill_name: String,
+        overwrite: bool,
+        promote: bool,
     },
     RefreshProject {
         project_path: Utf8PathBuf,
@@ -166,6 +173,22 @@ impl GuiController {
                     agent_id,
                     skill_query: skill_name,
                     force: *force,
+                })?;
+            }
+            GuiActionIntent::RedeployDeployment {
+                project_path,
+                agent_id,
+                skill_name,
+                overwrite,
+                promote,
+            } => {
+                let _outcome = redeploy_project_skill(ProjectRedeployRequest {
+                    app_paths: &self.paths,
+                    project_path,
+                    agent_id,
+                    skill_query: skill_name,
+                    overwrite: *overwrite,
+                    promote: *promote,
                 })?;
             }
             GuiActionIntent::RefreshProject { .. }
@@ -376,6 +399,33 @@ impl GuiModel {
             agent_id: deployment.agent_id,
             skill_name: deployment.skill_name,
             force,
+        })
+    }
+
+    pub fn request_redeploy_selected_deployment(&mut self) -> Option<GuiActionIntent> {
+        self.request_redeploy_selected_deployment_with_options(false, false)
+    }
+
+    pub fn request_overwrite_selected_deployment(&mut self) -> Option<GuiActionIntent> {
+        self.request_redeploy_selected_deployment_with_options(true, false)
+    }
+
+    pub fn request_promote_selected_deployment(&mut self) -> Option<GuiActionIntent> {
+        self.request_redeploy_selected_deployment_with_options(false, true)
+    }
+
+    fn request_redeploy_selected_deployment_with_options(
+        &mut self,
+        overwrite: bool,
+        promote: bool,
+    ) -> Option<GuiActionIntent> {
+        let deployment = self.selected_deployment()?.clone();
+        self.push_intent(GuiActionIntent::RedeployDeployment {
+            project_path: deployment.project_path,
+            agent_id: deployment.agent_id,
+            skill_name: deployment.skill_name,
+            overwrite,
+            promote,
         })
     }
 

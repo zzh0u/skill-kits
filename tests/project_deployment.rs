@@ -9,8 +9,8 @@ use skill_kits::core::{
     project::{
         deploy_project_skill, disable_project_skill, enable_project_skill,
         project_deployment_status, redeploy_project_skill, remove_project_skill,
-        ProjectDeployRequest, ProjectRedeployRequest, ProjectRemoveRequest, ProjectSkillRequest,
-        RedeployOutcome,
+        resolve_project_scope, ProjectDeployRequest, ProjectRedeployRequest, ProjectRemoveRequest,
+        ProjectSkillRequest, RedeployOutcome,
     },
     registry::{DeploymentsRegistry, ManagedSkill, SkillSource, SkillsRegistry, ToggleState},
     SkillKitsError,
@@ -65,6 +65,26 @@ fn seed_managed_skill(paths: &AppPaths, id: &str, name: &str, body: &str) -> Man
         &DeploymentsRegistry::default(),
     );
     skill
+}
+
+#[test]
+fn resolve_project_scope_normalizes_equivalent_existing_paths() {
+    let temp_dir = TempDir::new().unwrap();
+    let project = Utf8PathBuf::from_path_buf(temp_dir.path().join("project")).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let project_dot = project.join(".");
+    let project_link = Utf8PathBuf::from_path_buf(temp_dir.path().join("project-link")).unwrap();
+    std::os::unix::fs::symlink(&project, &project_link).unwrap();
+
+    let direct = resolve_project_scope(Some(&project)).unwrap();
+    let dotted = resolve_project_scope(Some(&project_dot)).unwrap();
+    let linked = resolve_project_scope(Some(&project_link)).unwrap();
+
+    assert_eq!(direct.name, "project");
+    assert_eq!(dotted.name, "project");
+    assert_eq!(linked.name, "project");
+    assert_eq!(direct.path, dotted.path);
+    assert_eq!(direct.path, linked.path);
 }
 
 #[test]

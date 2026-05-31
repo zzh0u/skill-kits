@@ -324,6 +324,7 @@ fn render_project_status(
                     vec![
                         TableColumn::from(deployment.record.skill_name),
                         TableColumn::from(deployment.record.agent_id.to_string()),
+                        TableColumn::from(deployment.record.deployment_path.to_string()),
                         TableColumn::from(format!("{:?}", deployment.toggle)),
                         TableColumn::from(deployment.outdated),
                         TableColumn::from(deployment.drift),
@@ -335,6 +336,7 @@ fn render_project_status(
                 &[
                     "Skill",
                     "Agent",
+                    "Project Skill Dir",
                     "Toggle",
                     "Outdated",
                     "Drift",
@@ -682,5 +684,37 @@ mod tests {
 
         assert!(output.contains("Missing Managed Source"));
         assert!(output.contains("true"));
+    }
+
+    #[test]
+    fn project_status_table_reports_project_skill_dir() {
+        let output = render_project_status(
+            vec![DeploymentStatus {
+                record: DeploymentRecord {
+                    id: "deployment".to_string(),
+                    skill_id: SkillId::new("frontend-design"),
+                    agent_id: AgentId::new("codex"),
+                    project_name: "project".to_string(),
+                    project_path: "/tmp/project".into(),
+                    deployment_path: "/tmp/project/.agents/skills/frontend-design".into(),
+                    skill_name: "frontend-design".to_string(),
+                    baseline_hash: "baseline".to_string(),
+                    deployed_from_hash: "deployed".to_string(),
+                    created_at: "2026-05-31T00:00:00Z".to_string(),
+                    updated_at: "2026-05-31T00:00:00Z".to_string(),
+                },
+                toggle: ToggleState::Enabled,
+                current_hash: Some("baseline".to_string()),
+                drift: false,
+                outdated: false,
+                missing_managed_source: false,
+            }],
+            OutputFormat::Table,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(output.contains("Project Skill Dir"));
+        assert!(output.contains("/tmp/project/.agents/skills/frontend-design"));
     }
 }

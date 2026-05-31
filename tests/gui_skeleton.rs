@@ -12,6 +12,7 @@ use skill_kits::core::{
     },
 };
 use skill_kits::gui::state::{GuiActionIntent, GuiController, GuiModel, GuiScope, NavigationView};
+use skill_kits::gui::{project_actions, ProjectAction};
 use tempfile::TempDir;
 
 fn test_paths(temp_dir: &TempDir) -> AppPaths {
@@ -242,6 +243,71 @@ fn actions_emit_intents_without_direct_filesystem_mutation() {
 }
 
 #[test]
+fn redeploy_actions_emit_selected_deployment_intents_without_direct_filesystem_mutation() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+
+    let skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    write_config_with_codex_project(&paths, &project);
+
+    deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.select_deployment(model.deployments[0].id.clone());
+
+    assert_eq!(
+        model.request_redeploy_selected_deployment(),
+        Some(GuiActionIntent::RedeployDeployment {
+            project_path: project.clone(),
+            agent_id: AgentId::new("codex"),
+            skill_name: "frontend-design".to_string(),
+            overwrite: false,
+            promote: false,
+        })
+    );
+    assert_eq!(
+        model.request_overwrite_selected_deployment(),
+        Some(GuiActionIntent::RedeployDeployment {
+            project_path: project.clone(),
+            agent_id: AgentId::new("codex"),
+            skill_name: "frontend-design".to_string(),
+            overwrite: true,
+            promote: false,
+        })
+    );
+    assert_eq!(
+        model.request_promote_selected_deployment(),
+        Some(GuiActionIntent::RedeployDeployment {
+            project_path: project,
+            agent_id: AgentId::new("codex"),
+            skill_name: "frontend-design".to_string(),
+            overwrite: false,
+            promote: true,
+        })
+    );
+    assert_eq!(model.pending_intents().len(), 3);
+}
+
+#[test]
 fn controller_executes_project_action_intents_and_reloads_model_state() {
     let temp_dir = TempDir::new().unwrap();
     let paths = test_paths(&temp_dir);
@@ -299,6 +365,68 @@ fn controller_executes_project_action_intents_and_reloads_model_state() {
     assert!(model.execute_next_intent(&controller).unwrap().is_some());
     assert_eq!(model.deployments.len(), 0);
     assert!(!project.join(".agents/skills/frontend-design").exists());
+}
+
+#[test]
+fn controller_executes_redeploy_intent_and_reloads_model_state() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+    write_config_with_codex_project(&paths, &project);
+
+    let mut skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    skill.content_hash = hash_skill_dir(&skill.managed_path).unwrap();
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+    std::fs::write(
+        paths.skills_dir.join("frontend-design-a1b2c3d4/SKILL.md"),
+        "# Frontend Design\n\nUpdated upstream\n",
+    )
+    .unwrap();
+    let mut updated_skill = managed_skill(&paths);
+    updated_skill.content_hash = hash_skill_dir(&updated_skill.managed_path).unwrap();
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![updated_skill],
+        },
+    )
+    .unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.select_deployment(model.deployments[0].id.clone());
+    model.request_redeploy_selected_deployment().unwrap();
+
+    let controller = GuiController::new(paths);
+    assert!(model.execute_next_intent(&controller).unwrap().is_some());
+
+    assert_eq!(model.pending_intents().len(), 0);
+    assert_eq!(model.deployments.len(), 1);
+    assert!(
+        std::fs::read_to_string(project.join(".agents/skills/frontend-design/SKILL.md"))
+            .unwrap()
+            .contains("Updated upstream")
+    );
+    assert!(!model.selected_deployment_status().unwrap().outdated);
 }
 
 #[test]
@@ -514,5 +642,92 @@ fn projects_inspector_limits_actions_for_missing_managed_source_deployments() {
     assert_eq!(
         actions.lines,
         vec!["Available actions: Promote to managed, Remove from project.".to_string()]
+    );
+}
+
+#[test]
+fn projects_controls_limit_actions_for_missing_managed_source_deployments() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+
+    let skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    write_config_with_codex_project(&paths, &project);
+
+    deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+    write_skills_registry(&paths, &SkillsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Projects);
+    model.select_deployment(model.deployments[0].id.clone());
+
+    assert_eq!(
+        project_actions(&model),
+        vec![ProjectAction::Promote, ProjectAction::Remove]
+    );
+}
+
+#[test]
+fn projects_controls_keep_normal_deployment_actions() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+
+    let skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    write_config_with_codex_project(&paths, &project);
+
+    deploy_project_skill(ProjectDeployRequest {
+        app_paths: &paths,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "frontend-design",
+    })
+    .unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Projects);
+    model.select_deployment(model.deployments[0].id.clone());
+
+    assert_eq!(
+        project_actions(&model),
+        vec![
+            ProjectAction::Deploy,
+            ProjectAction::Enable,
+            ProjectAction::Disable,
+            ProjectAction::Redeploy,
+            ProjectAction::Overwrite,
+            ProjectAction::Promote,
+            ProjectAction::Remove,
+        ]
     );
 }

@@ -8,6 +8,54 @@ use crate::core::paths::AppPaths;
 use eframe::egui;
 use state::{GuiModel, GuiScope, NavigationView, RenderableView, UiColors};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectAction {
+    Deploy,
+    Enable,
+    Disable,
+    Redeploy,
+    Overwrite,
+    Promote,
+    Remove,
+}
+
+impl ProjectAction {
+    const NORMAL: [Self; 7] = [
+        Self::Deploy,
+        Self::Enable,
+        Self::Disable,
+        Self::Redeploy,
+        Self::Overwrite,
+        Self::Promote,
+        Self::Remove,
+    ];
+
+    const MISSING_MANAGED_SOURCE: [Self; 2] = [Self::Promote, Self::Remove];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Deploy => "Deploy",
+            Self::Enable => "Enable",
+            Self::Disable => "Disable",
+            Self::Redeploy => "Redeploy",
+            Self::Overwrite => "Overwrite",
+            Self::Promote => "Promote",
+            Self::Remove => "Remove",
+        }
+    }
+}
+
+pub fn project_actions(model: &GuiModel) -> Vec<ProjectAction> {
+    if model
+        .selected_deployment_status()
+        .is_some_and(|status| status.missing_managed_source)
+    {
+        ProjectAction::MISSING_MANAGED_SOURCE.to_vec()
+    } else {
+        ProjectAction::NORMAL.to_vec()
+    }
+}
+
 pub struct SkillKitsGuiApp {
     model: GuiModel,
     colors: UiColors,
@@ -220,29 +268,60 @@ fn render_action_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCol
             });
         }
         NavigationView::Projects => {
-            ui.horizontal(|ui| {
-                if ui.button("Deploy").clicked() {
-                    if let Some(agent_id) = model.agents.first().map(|agent| agent.id.clone()) {
-                        let _ = model.request_deploy_selected_skill(agent_id);
+            for actions in project_actions(model).chunks(3) {
+                ui.horizontal(|ui| {
+                    for action in actions {
+                        render_project_action_button(ui, model, colors, *action);
                     }
-                }
-                if ui.button("Enable").clicked() {
-                    let _ = model.request_enable_selected_deployment();
-                }
-                if ui.button("Disable").clicked() {
-                    let _ = model.request_disable_selected_deployment();
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui
-                    .button(egui::RichText::new("Remove").color(colors.danger))
-                    .clicked()
-                {
-                    let _ = model.request_remove_selected_deployment(false);
-                }
-            });
+                });
+            }
         }
         NavigationView::Dashboard | NavigationView::Agents => {}
+    }
+}
+
+fn render_project_action_button(
+    ui: &mut egui::Ui,
+    model: &mut GuiModel,
+    colors: UiColors,
+    action: ProjectAction,
+) {
+    let label = action.label();
+    let clicked = if matches!(action, ProjectAction::Remove) {
+        ui.button(egui::RichText::new(label).color(colors.danger))
+            .clicked()
+    } else {
+        ui.button(label).clicked()
+    };
+
+    if !clicked {
+        return;
+    }
+
+    match action {
+        ProjectAction::Deploy => {
+            if let Some(agent_id) = model.agents.first().map(|agent| agent.id.clone()) {
+                let _ = model.request_deploy_selected_skill(agent_id);
+            }
+        }
+        ProjectAction::Enable => {
+            let _ = model.request_enable_selected_deployment();
+        }
+        ProjectAction::Disable => {
+            let _ = model.request_disable_selected_deployment();
+        }
+        ProjectAction::Redeploy => {
+            let _ = model.request_redeploy_selected_deployment();
+        }
+        ProjectAction::Overwrite => {
+            let _ = model.request_overwrite_selected_deployment();
+        }
+        ProjectAction::Promote => {
+            let _ = model.request_promote_selected_deployment();
+        }
+        ProjectAction::Remove => {
+            let _ = model.request_remove_selected_deployment(false);
+        }
     }
 }
 
