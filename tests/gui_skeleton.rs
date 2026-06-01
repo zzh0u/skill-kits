@@ -483,6 +483,59 @@ fn selected_agent_space_instance_can_be_imported_as_managed_copy() {
 }
 
 #[test]
+fn selected_project_skill_instance_import_records_project_source_and_deployment_link() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+    write_config_with_codex_project(&paths, &project);
+    write_skills_registry(&paths, &SkillsRegistry::default()).unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    let skill_dir = project.join(".agents/skills/project-only");
+    write_skill(&skill_dir, "# Project Only\n");
+
+    let home = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).unwrap();
+    let mut model = GuiModel::load_with_home_dir(&paths, home).unwrap();
+    model.navigate(NavigationView::Skills);
+    let row_id = model
+        .skill_instances
+        .iter()
+        .find(|instance| instance.skill_dir == skill_dir)
+        .expect("project instance")
+        .id
+        .clone();
+    assert!(model.select_render_row(&row_id));
+    assert!(skill_actions(&model).contains(&SkillAction::ImportManagedCopy));
+    assert_eq!(
+        model.request_import_selected_skill_instance_as_managed_copy(),
+        Some(GuiActionIntent::ImportManagedCopy {
+            instance_id: row_id.clone(),
+        })
+    );
+
+    let controller = GuiController::new(paths.clone());
+    assert!(model.execute_next_intent(&controller).unwrap().is_some());
+
+    assert_eq!(model.selected_skill_instance().unwrap().id, row_id);
+    assert_eq!(model.skills.len(), 1);
+    assert!(matches!(
+        &model.skills[0].source,
+        SkillSource::ProjectAdopt {
+            agent_id,
+            project_path,
+            source_path,
+        } if agent_id == &AgentId::new("codex")
+            && project_path == &project
+            && source_path == &skill_dir
+    ));
+    let deployments = read_deployments_registry(&paths).unwrap().deployments;
+    assert_eq!(deployments.len(), 1);
+    assert_eq!(deployments[0].deployment_path, skill_dir);
+    assert_eq!(deployments[0].skill_id, model.skills[0].id);
+}
+
+#[test]
 fn skills_inspector_includes_risk_findings_and_project_deployment_links_when_available() {
     let temp_dir = TempDir::new().unwrap();
     let paths = test_paths(&temp_dir);

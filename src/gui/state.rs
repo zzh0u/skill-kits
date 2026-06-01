@@ -361,11 +361,37 @@ impl GuiController {
                     .ok_or_else(|| SkillKitsError::SkillNotFound {
                         query: instance_id.clone(),
                     })?;
-                let skill = import_managed_copy(ImportManagedCopyRequest {
-                    app_paths: &self.paths,
-                    agent_id: &instance.agent_id,
-                    source_path: &instance.skill_dir,
-                })?;
+                let skill = match &instance.scope {
+                    SkillInstanceScope::Global => import_managed_copy(ImportManagedCopyRequest {
+                        app_paths: &self.paths,
+                        agent_id: &instance.agent_id,
+                        source_path: &instance.skill_dir,
+                    })?,
+                    SkillInstanceScope::Project { path, .. } => {
+                        project_adopt(ProjectAdoptRequest {
+                            app_paths: &self.paths,
+                            project_path: path,
+                            agent_id: &instance.agent_id,
+                            skill_name: instance
+                                .skill_dir
+                                .file_name()
+                                .unwrap_or(instance.name.as_str()),
+                        })?;
+                        read_skills_registry(&self.paths)?
+                            .skills
+                            .into_iter()
+                            .find(|skill| {
+                                matches!(
+                                    &skill.source,
+                                    SkillSource::ProjectAdopt { source_path, .. }
+                                        if source_path == &instance.skill_dir
+                                )
+                            })
+                            .ok_or_else(|| SkillKitsError::SkillNotFound {
+                                query: instance.name.clone(),
+                            })?
+                    }
+                };
                 let findings = scan_skill_dir(&skill.managed_path)?;
                 GuiControllerOutcome::SkillInstalled {
                     skill_id: skill.id,
