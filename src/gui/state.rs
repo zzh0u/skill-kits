@@ -23,6 +23,8 @@ use egui::Color32;
 
 pub const DRIFT_REMOVE_CONFIRMATION_MESSAGE: &str =
     "This project copy has local changes. Removing it deletes only this deployed Skill, not the Agent skill root.";
+pub const GLOBAL_UNINSTALL_CONFIRMATION_MESSAGE: &str =
+    "Uninstall removes this Skill from Global Inventory. Source files and project deployments are not deleted.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NavigationView {
@@ -536,6 +538,7 @@ pub struct GuiModel {
     selected_agent: Option<AgentId>,
     selected_project: Option<Utf8PathBuf>,
     selected_deployment: Option<String>,
+    pending_uninstall_confirmation: Option<SkillId>,
     pending_remove_confirmation: Option<String>,
     pending_intents: Vec<GuiActionIntent>,
     last_status: Option<GuiStatus>,
@@ -605,6 +608,7 @@ impl GuiModel {
             selected_agent: None,
             selected_project,
             selected_deployment: None,
+            pending_uninstall_confirmation: None,
             pending_remove_confirmation: None,
             pending_intents: Vec::new(),
             last_status: None,
@@ -628,6 +632,13 @@ impl GuiModel {
     }
 
     pub fn select_skill(&mut self, skill_id: SkillId) {
+        if self
+            .pending_uninstall_confirmation
+            .as_ref()
+            .is_some_and(|pending| pending != &skill_id)
+        {
+            self.pending_uninstall_confirmation = None;
+        }
         self.selected_skill = Some(skill_id);
     }
 
@@ -707,6 +718,18 @@ impl GuiModel {
         self.pending_remove_confirmation.as_deref()
     }
 
+    pub fn pending_uninstall_confirmation(&self) -> Option<&str> {
+        self.pending_uninstall_confirmation
+            .as_ref()
+            .map(SkillId::as_str)
+    }
+
+    pub fn pending_uninstall_confirmation_message(&self) -> Option<&'static str> {
+        self.pending_uninstall_confirmation
+            .as_ref()
+            .map(|_| GLOBAL_UNINSTALL_CONFIRMATION_MESSAGE)
+    }
+
     pub fn pending_remove_confirmation_message(&self) -> Option<&'static str> {
         self.pending_remove_confirmation
             .as_ref()
@@ -742,9 +765,20 @@ impl GuiModel {
         self.install_local_skill_draft = None;
     }
 
-    pub fn request_uninstall_selected_skill(&mut self) -> Option<GuiActionIntent> {
+    pub fn request_uninstall_selected_skill(&mut self, confirmed: bool) -> Option<GuiActionIntent> {
         let skill_id = self.selected_skill.clone()?;
+        if !confirmed {
+            self.pending_uninstall_confirmation = Some(skill_id);
+            return None;
+        }
+        self.pending_uninstall_confirmation = None;
         self.push_intent(GuiActionIntent::UninstallSkill { skill_id })
+    }
+
+    pub fn confirm_pending_uninstall(&mut self) -> Option<GuiActionIntent> {
+        let skill_id = self.pending_uninstall_confirmation.clone()?;
+        self.selected_skill = Some(skill_id);
+        self.request_uninstall_selected_skill(true)
     }
 
     pub fn request_deploy_selected_skill(&mut self, agent_id: AgentId) -> Option<GuiActionIntent> {
@@ -1010,6 +1044,7 @@ impl GuiModel {
         let selected_agent = self.selected_agent.clone();
         let selected_project = self.selected_project.clone();
         let selected_deployment = self.selected_deployment.clone();
+        let pending_uninstall_confirmation = self.pending_uninstall_confirmation.clone();
         let pending_remove_confirmation = self.pending_remove_confirmation.clone();
         let pending_intents = self.pending_intents.clone();
         let skill_risk_reports = self.skill_risk_reports.clone();
@@ -1082,6 +1117,8 @@ impl GuiModel {
                 .iter()
                 .any(|deployment| deployment.id == *selected)
         });
+        self.pending_uninstall_confirmation = pending_uninstall_confirmation
+            .filter(|pending| self.skills.iter().any(|skill| skill.id == *pending));
         self.pending_remove_confirmation = pending_remove_confirmation.filter(|pending| {
             self.deployments
                 .iter()
@@ -1453,6 +1490,7 @@ impl Default for GuiModel {
             selected_agent: None,
             selected_project: None,
             selected_deployment: None,
+            pending_uninstall_confirmation: None,
             pending_remove_confirmation: None,
             pending_intents: Vec::new(),
             last_status: None,

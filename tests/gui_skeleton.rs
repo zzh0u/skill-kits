@@ -15,6 +15,7 @@ use skill_kits::core::{
 use skill_kits::gui::state::{
     GuiActionIntent, GuiController, GuiModel, GuiScope, GuiStatusKind, NavigationView,
     ProjectConflict, ProjectSummary, DRIFT_REMOVE_CONFIRMATION_MESSAGE,
+    GLOBAL_UNINSTALL_CONFIRMATION_MESSAGE,
 };
 use skill_kits::gui::{
     agent_actions, project_actions, skill_actions, AgentAction, ProjectAction, SkillAction,
@@ -1869,6 +1870,73 @@ fn confirm_drifted_remove_queues_force_remove_intent() {
 }
 
 #[test]
+fn global_uninstall_first_click_records_confirmation_without_queueing_uninstall() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_config(&paths, &Config::default()).unwrap();
+
+    let skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill.clone()],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.select_skill(skill.id.clone());
+
+    assert_eq!(model.request_uninstall_selected_skill(false), None);
+    assert_eq!(model.pending_intents(), &[]);
+    assert_eq!(
+        model.pending_uninstall_confirmation(),
+        Some(skill.id.as_str())
+    );
+    assert_eq!(
+        model.pending_uninstall_confirmation_message(),
+        Some(GLOBAL_UNINSTALL_CONFIRMATION_MESSAGE)
+    );
+}
+
+#[test]
+fn confirm_global_uninstall_queues_uninstall_intent() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_config(&paths, &Config::default()).unwrap();
+
+    let skill = managed_skill(&paths);
+    write_skill(&skill.managed_path, "# Frontend Design\n");
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![skill.clone()],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.select_skill(skill.id.clone());
+    assert_eq!(model.request_uninstall_selected_skill(false), None);
+
+    assert_eq!(
+        model.confirm_pending_uninstall(),
+        Some(GuiActionIntent::UninstallSkill {
+            skill_id: skill.id.clone(),
+        })
+    );
+    assert_eq!(model.pending_uninstall_confirmation(), None);
+    assert_eq!(model.pending_intents().len(), 1);
+}
+
+#[test]
 fn controller_executes_project_action_intents_and_reloads_model_state() {
     let temp_dir = TempDir::new().unwrap();
     let paths = test_paths(&temp_dir);
@@ -2011,7 +2079,8 @@ fn controller_executes_uninstall_intent_and_reloads_global_inventory() {
 
     let mut model = GuiModel::load(&paths).unwrap();
     model.select_skill(skill.id.clone());
-    model.request_uninstall_selected_skill().unwrap();
+    assert_eq!(model.request_uninstall_selected_skill(false), None);
+    model.confirm_pending_uninstall().unwrap();
 
     let controller = GuiController::new(paths.clone());
     assert!(model.execute_next_intent(&controller).unwrap().is_some());

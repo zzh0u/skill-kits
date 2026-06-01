@@ -9,6 +9,7 @@ use eframe::egui;
 use state::{
     AgentEditorMode, GuiController, GuiModel, GuiScope, GuiStatusKind, NavigationView,
     RenderableView, UiColors, DRIFT_REMOVE_CONFIRMATION_MESSAGE,
+    GLOBAL_UNINSTALL_CONFIRMATION_MESSAGE,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -465,12 +466,23 @@ fn render_skill_action_button(
             let _ = model.request_deploy_selected_skill_to_default_agent();
         }
         SkillAction::Uninstall => {
-            let _ = model.request_uninstall_selected_skill();
+            let _ = model.request_uninstall_selected_skill(false);
         }
     }
 }
 
 fn render_skill_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColors) {
+    if model.pending_uninstall_confirmation().is_some() {
+        ui.label(egui::RichText::new(GLOBAL_UNINSTALL_CONFIRMATION_MESSAGE).color(colors.warning));
+        if ui
+            .button(egui::RichText::new("Confirm Uninstall").color(colors.danger))
+            .clicked()
+        {
+            let _ = model.confirm_pending_uninstall();
+        }
+        ui.add_space(4.0);
+    }
+
     if let Some(draft) = model.install_local_skill_draft().cloned() {
         let mut path_text = draft.path_text;
         ui.label(egui::RichText::new("Local Skill path").color(colors.ink_subtle));
