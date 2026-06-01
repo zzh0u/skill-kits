@@ -25,7 +25,7 @@ pub fn renderable(model: &GuiModel) -> RenderableView {
                 outdated_label(status),
                 drift_label(status),
                 missing_source_label(status),
-                "Not scanned".to_string(),
+                risk_label(model, status),
                 status.record.deployment_path.to_string(),
             ],
         })
@@ -207,4 +207,11 @@ fn missing_source_label(status: &DeploymentStatus) -> String {
     } else {
         "No".to_string()
     }
+}
+
+fn risk_label(model: &GuiModel, status: &DeploymentStatus) -> String {
+    model
+        .skill_risk_report(&status.record.skill_id)
+        .map(crate::gui::state::GuiRiskReport::summary_label)
+        .unwrap_or_else(|| "Not scanned".to_string())
 }
