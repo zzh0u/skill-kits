@@ -24,6 +24,7 @@ pub enum ProjectAction {
     AdoptAll,
     ImportAsNew,
     Skip,
+    Deploy,
     Enable,
     Disable,
     Redeploy,
@@ -72,6 +73,7 @@ impl ProjectAction {
             Self::AdoptAll => "Adopt all",
             Self::ImportAsNew => "Import as new",
             Self::Skip => "Skip",
+            Self::Deploy => "Deploy",
             Self::Enable => "Enable",
             Self::Disable => "Disable",
             Self::Redeploy => "Redeploy",
@@ -114,9 +116,15 @@ pub fn agent_actions(model: &GuiModel) -> Vec<AgentAction> {
 }
 
 pub fn project_actions(model: &GuiModel) -> Vec<ProjectAction> {
+    let mut deploy_action = if model.has_project_deploy_target() {
+        vec![ProjectAction::Deploy]
+    } else {
+        Vec::new()
+    };
+
     if model.selected_deployment_status().is_none() {
         if model.selected_project_summary().is_none() {
-            return Vec::new();
+            return deploy_action;
         }
         if model
             .selected_project_summary()
@@ -125,7 +133,8 @@ pub fn project_actions(model: &GuiModel) -> Vec<ProjectAction> {
                 .selected_project_summary()
                 .is_some_and(|project| project.discovered_unmanaged_count == 0)
         {
-            return ProjectAction::REFRESH.to_vec();
+            deploy_action.extend(ProjectAction::REFRESH);
+            return deploy_action;
         }
     }
 
@@ -134,7 +143,8 @@ pub fn project_actions(model: &GuiModel) -> Vec<ProjectAction> {
         .is_some_and(|project| !project.pending_conflicts.is_empty())
         && model.selected_deployment_status().is_none()
     {
-        return ProjectAction::CONFLICT.to_vec();
+        deploy_action.extend(ProjectAction::CONFLICT);
+        return deploy_action;
     }
 
     if model
@@ -142,7 +152,8 @@ pub fn project_actions(model: &GuiModel) -> Vec<ProjectAction> {
         .is_some_and(|project| project.discovered_unmanaged_count > project.pending_conflicts.len())
         && model.selected_deployment_status().is_none()
     {
-        return ProjectAction::ONBOARDING.to_vec();
+        deploy_action.extend(ProjectAction::ONBOARDING);
+        return deploy_action;
     }
 
     if model
@@ -151,7 +162,9 @@ pub fn project_actions(model: &GuiModel) -> Vec<ProjectAction> {
     {
         ProjectAction::MISSING_MANAGED_SOURCE.to_vec()
     } else {
-        ProjectAction::NORMAL.to_vec()
+        let mut actions = ProjectAction::NORMAL.to_vec();
+        deploy_action.append(&mut actions);
+        deploy_action
     }
 }
 
@@ -510,6 +523,9 @@ fn render_project_action_button(
         }
         ProjectAction::Skip => {
             let _ = model.skip_selected_project_conflict();
+        }
+        ProjectAction::Deploy => {
+            let _ = model.request_deploy_selected_skill_to_target_agent();
         }
         ProjectAction::Enable => {
             let _ = model.request_enable_selected_deployment();

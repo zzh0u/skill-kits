@@ -776,6 +776,135 @@ fn skills_deploy_action_requires_explicit_project_scope_and_enabled_agent() {
 }
 
 #[test]
+fn projects_inspector_renders_explicit_deploy_target_for_selected_project_skill_and_agent() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+    write_config(
+        &paths,
+        &Config {
+            agents: vec![
+                AgentConfig {
+                    id: AgentId::new("codex"),
+                    label: "Codex".to_string(),
+                    kind: AgentKind::BuiltIn,
+                    global_skill_dirs: Vec::new(),
+                    project_skill_dirs: vec![".agents/skills".into()],
+                    enabled: true,
+                },
+                AgentConfig {
+                    id: AgentId::new("custom"),
+                    label: "Custom".to_string(),
+                    kind: AgentKind::Custom,
+                    global_skill_dirs: Vec::new(),
+                    project_skill_dirs: vec![".custom/skills".into()],
+                    enabled: true,
+                },
+            ],
+            recent_projects: vec![RecentProject {
+                name: "sample-app".to_string(),
+                path: project.clone(),
+                last_opened_at: "2026-05-31T00:00:00Z".to_string(),
+            }],
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![managed_skill(&paths)],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Projects);
+    model.select_scope(GuiScope::Project(project.clone()));
+    model.select_skill(SkillId::new("frontend-design-a1b2c3d4"));
+    model.select_agent(AgentId::new("custom"));
+
+    assert_eq!(
+        section_lines(&model, "Deploy Target"),
+        vec![
+            "Skill frontend-design".to_string(),
+            "Agent Custom".to_string(),
+            format!("Target {}", project.join(".custom/skills/frontend-design")),
+        ]
+    );
+    assert!(project_actions(&model).contains(&ProjectAction::Deploy));
+    assert_eq!(
+        model.request_deploy_selected_skill_to_target_agent(),
+        Some(GuiActionIntent::DeploySkill {
+            project_path: project,
+            agent_id: AgentId::new("custom"),
+            skill_id: SkillId::new("frontend-design-a1b2c3d4"),
+        })
+    );
+}
+
+#[test]
+fn projects_deploy_action_is_hidden_without_project_skill_or_enabled_target_agent() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+    write_config(
+        &paths,
+        &Config {
+            agents: vec![AgentConfig {
+                id: AgentId::new("codex"),
+                label: "Codex".to_string(),
+                kind: AgentKind::BuiltIn,
+                global_skill_dirs: Vec::new(),
+                project_skill_dirs: vec![".agents/skills".into()],
+                enabled: true,
+            }],
+            recent_projects: vec![RecentProject {
+                name: "sample-app".to_string(),
+                path: project.clone(),
+                last_opened_at: "2026-05-31T00:00:00Z".to_string(),
+            }],
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![managed_skill(&paths)],
+        },
+    )
+    .unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Projects);
+    model.select_scope(GuiScope::Project(project));
+    model.select_skill(SkillId::new("frontend-design-a1b2c3d4"));
+    assert!(!project_actions(&model).contains(&ProjectAction::Deploy));
+    assert_eq!(model.request_deploy_selected_skill_to_target_agent(), None);
+
+    model.select_agent(AgentId::new("codex"));
+    model.select_skill(SkillId::new("missing-skill"));
+    assert!(!project_actions(&model).contains(&ProjectAction::Deploy));
+    assert_eq!(model.request_deploy_selected_skill_to_target_agent(), None);
+
+    model.select_skill(SkillId::new("frontend-design-a1b2c3d4"));
+    model.agents.iter_mut().for_each(|agent| {
+        agent.enabled = false;
+    });
+    assert!(!project_actions(&model).contains(&ProjectAction::Deploy));
+    assert_eq!(model.request_deploy_selected_skill_to_target_agent(), None);
+}
+
+#[test]
 fn selecting_project_clears_stale_deployment_selection_for_onboarding() {
     let temp_dir = TempDir::new().unwrap();
     let paths = test_paths(&temp_dir);

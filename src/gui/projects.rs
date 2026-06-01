@@ -91,6 +91,10 @@ fn inspector_sections(model: &GuiModel) -> Vec<InspectorSection> {
                 lines: onboarding_lines(project),
             },
             InspectorSection {
+                title: "Deploy Target".to_string(),
+                lines: deploy_target_lines(model),
+            },
+            InspectorSection {
                 title: "Git Ignore Guidance".to_string(),
                 lines: vec!["Guidance only. Skill-kits does not edit .gitignore.".to_string()],
             },
@@ -139,6 +143,18 @@ fn onboarding_lines(project: &crate::gui::state::ProjectSummary) -> Vec<String> 
             .to_string(),
     ]);
     lines
+}
+
+fn deploy_target_lines(model: &GuiModel) -> Vec<String> {
+    let Some(target) = model.project_deploy_target() else {
+        return vec!["Select a managed Skill and enabled Agent to deploy.".to_string()];
+    };
+
+    vec![
+        format!("Skill {}", target.skill_name),
+        format!("Agent {}", target.agent_label),
+        format!("Target {}", target.target_path),
+    ]
 }
 
 fn action_lines(status: &DeploymentStatus) -> Vec<String> {

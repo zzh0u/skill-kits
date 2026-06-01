@@ -448,6 +448,16 @@ impl GuiRiskReport {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectDeployTarget {
+    pub project_path: Utf8PathBuf,
+    pub skill_id: SkillId,
+    pub skill_name: String,
+    pub agent_id: AgentId,
+    pub agent_label: String,
+    pub target_path: Utf8PathBuf,
+}
+
 #[derive(Clone, Debug)]
 pub struct GuiModel {
     pub active_view: NavigationView,
@@ -678,12 +688,46 @@ impl GuiModel {
         self.request_deploy_selected_skill(agent_id)
     }
 
+    pub fn request_deploy_selected_skill_to_target_agent(&mut self) -> Option<GuiActionIntent> {
+        let target = self.project_deploy_target()?;
+        self.push_intent(GuiActionIntent::DeploySkill {
+            project_path: target.project_path,
+            agent_id: target.agent_id,
+            skill_id: target.skill_id,
+        })
+    }
+
     pub fn has_explicit_project_deploy_target(&self) -> bool {
         matches!(self.active_scope, GuiScope::Project(_))
             && self
                 .agents
                 .iter()
                 .any(|agent| agent.enabled && !agent.project_skill_dirs.is_empty())
+    }
+
+    pub fn has_project_deploy_target(&self) -> bool {
+        self.project_deploy_target().is_some()
+    }
+
+    pub fn project_deploy_target(&self) -> Option<ProjectDeployTarget> {
+        let GuiScope::Project(project_path) = &self.active_scope else {
+            return None;
+        };
+        let skill = self.selected_skill()?;
+        let selected_agent = self.selected_agent.as_ref()?;
+        let agent = self.agents.iter().find(|agent| {
+            agent.id == *selected_agent && agent.enabled && !agent.project_skill_dirs.is_empty()
+        })?;
+        let project_dir = agent.project_skill_dirs.first()?.clone();
+
+        Some(ProjectDeployTarget {
+            project_path: project_path.clone(),
+            skill_id: skill.id.clone(),
+            skill_name: skill.name.clone(),
+            agent_id: agent.id.clone(),
+            agent_label: agent.label.clone(),
+            target_path: project_path.join(project_dir).join(&skill.name),
+        })
     }
 
     pub fn request_refresh_selected_project(&mut self) -> Option<GuiActionIntent> {
