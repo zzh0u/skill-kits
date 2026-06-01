@@ -282,6 +282,7 @@ fn projects_onboarding_renders_adopt_all_for_discovered_unmanaged_summary() {
         name: "sample-app".to_string(),
         path: project.clone(),
         deployment_count: 0,
+        onboarding_scanned: false,
         discovered_unmanaged_count: 2,
         last_adopt_all_result: None,
         pending_conflicts: Vec::new(),
@@ -350,7 +351,43 @@ fn gui_empty_states_are_contextual_and_actionable() {
         section_lines(&model, "Empty"),
         vec![
             "No Recent Project is selected.".to_string(),
-            "Use the Scope switcher or refresh the current project to start onboarding."
+            "Open a project from the Scope switcher before scanning or deploying.".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn projects_onboarding_copy_distinguishes_not_scanned_from_no_unmanaged_skills() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "sample-app");
+    std::fs::create_dir_all(&project).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+    write_config_with_codex_project(&paths, &project);
+    write_skills_registry(&paths, &SkillsRegistry::default()).unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Projects);
+
+    assert_eq!(
+        section_lines(&model, "Onboarding"),
+        vec![
+            "Project has not been scanned in this GUI session.".to_string(),
+            "Refresh scans this project for existing Agent Skills without adopting automatically."
+                .to_string(),
+        ]
+    );
+
+    model.request_refresh_selected_project().unwrap();
+    let controller = GuiController::new(paths);
+    assert!(model.execute_next_intent(&controller).unwrap().is_some());
+
+    assert_eq!(
+        section_lines(&model, "Onboarding"),
+        vec![
+            "No unmanaged project Skills were found.".to_string(),
+            "Deploy a managed Skill to this project, or add an Agent Skill directory and Refresh."
                 .to_string(),
         ]
     );
@@ -1062,6 +1099,7 @@ fn project_adopt_all_intent_executes_for_discovered_project_skills() {
         name: "sample-app".to_string(),
         path: project.clone(),
         deployment_count: 0,
+        onboarding_scanned: false,
         discovered_unmanaged_count: 1,
         last_adopt_all_result: None,
         pending_conflicts: Vec::new(),
@@ -1146,6 +1184,7 @@ fn project_adopt_all_intent_runs_for_multiple_enabled_agents() {
         name: "sample-app".to_string(),
         path: project.clone(),
         deployment_count: 0,
+        onboarding_scanned: false,
         discovered_unmanaged_count: 2,
         last_adopt_all_result: None,
         pending_conflicts: Vec::new(),
@@ -1213,6 +1252,7 @@ fn project_adopt_all_keeps_conflicting_project_skills_discovered() {
         name: "sample-app".to_string(),
         path: project.clone(),
         deployment_count: 0,
+        onboarding_scanned: false,
         discovered_unmanaged_count: 1,
         last_adopt_all_result: None,
         pending_conflicts: Vec::new(),
@@ -1298,6 +1338,7 @@ fn project_conflict_import_as_new_intent_resolves_first_pending_conflict() {
         name: "sample-app".to_string(),
         path: project.clone(),
         deployment_count: 0,
+        onboarding_scanned: false,
         discovered_unmanaged_count: 1,
         last_adopt_all_result: None,
         pending_conflicts: vec![ProjectConflict {
@@ -1340,6 +1381,7 @@ fn project_conflict_skip_dismisses_first_pending_conflict_without_registry_mutat
         name: "sample-app".to_string(),
         path: project,
         deployment_count: 0,
+        onboarding_scanned: false,
         discovered_unmanaged_count: 1,
         last_adopt_all_result: None,
         pending_conflicts: vec![ProjectConflict {
@@ -1389,6 +1431,7 @@ fn refresh_project_keeps_unresolved_project_conflicts_actionable() {
         name: "sample-app".to_string(),
         path: project.clone(),
         deployment_count: 0,
+        onboarding_scanned: false,
         discovered_unmanaged_count: 1,
         last_adopt_all_result: None,
         pending_conflicts: Vec::new(),
@@ -1456,6 +1499,7 @@ fn skipped_conflict_does_not_block_adopt_all_for_new_unrelated_project_skill() {
         name: "sample-app".to_string(),
         path: project.clone(),
         deployment_count: 0,
+        onboarding_scanned: false,
         discovered_unmanaged_count: 1,
         last_adopt_all_result: None,
         pending_conflicts: vec![ProjectConflict {

@@ -105,8 +105,7 @@ fn inspector_sections(model: &GuiModel) -> Vec<InspectorSection> {
         title: "Empty".to_string(),
         lines: vec![
             "No Recent Project is selected.".to_string(),
-            "Use the Scope switcher or refresh the current project to start onboarding."
-                .to_string(),
+            "Open a project from the Scope switcher before scanning or deploying.".to_string(),
         ],
     }]
 }
@@ -137,11 +136,19 @@ fn onboarding_lines(project: &crate::gui::state::ProjectSummary) -> Vec<String> 
         return lines;
     }
 
-    lines.extend([
-        "No startup project scan has run.".to_string(),
-        "Refresh scans this project for existing Agent Skills without adopting automatically."
-            .to_string(),
-    ]);
+    if project.onboarding_scanned {
+        lines.extend([
+            "No unmanaged project Skills were found.".to_string(),
+            "Deploy a managed Skill to this project, or add an Agent Skill directory and Refresh."
+                .to_string(),
+        ]);
+    } else {
+        lines.extend([
+            "Project has not been scanned in this GUI session.".to_string(),
+            "Refresh scans this project for existing Agent Skills without adopting automatically."
+                .to_string(),
+        ]);
+    }
     lines
 }
 

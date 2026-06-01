@@ -411,6 +411,7 @@ pub struct ProjectSummary {
     pub name: String,
     pub path: Utf8PathBuf,
     pub deployment_count: usize,
+    pub onboarding_scanned: bool,
     pub discovered_unmanaged_count: usize,
     pub last_adopt_all_result: Option<ProjectAdoptAllSummary>,
     pub pending_conflicts: Vec<ProjectConflict>,
@@ -575,6 +576,7 @@ impl GuiModel {
                     name: project.name.clone(),
                     path: project.path.clone(),
                     deployment_count,
+                    onboarding_scanned: false,
                     discovered_unmanaged_count: 0,
                     last_adopt_all_result: None,
                     pending_conflicts: Vec::new(),
@@ -1386,6 +1388,7 @@ impl GuiModel {
                         pending_conflicts_minus_skipped(pending_conflicts, &skipped_conflicts)
                     };
                     summary.deployment_count = deployment_count;
+                    summary.onboarding_scanned = true;
                     summary.discovered_unmanaged_count =
                         discovered_unmanaged_count.saturating_sub(skipped_conflicts.len());
                     summary.last_adopt_all_result = adopt_result;
@@ -1399,6 +1402,7 @@ impl GuiModel {
                             .unwrap_or_else(|| project_path.to_string()),
                         path: project_path,
                         deployment_count,
+                        onboarding_scanned: true,
                         discovered_unmanaged_count,
                         last_adopt_all_result: adopt_result,
                         pending_conflicts,
