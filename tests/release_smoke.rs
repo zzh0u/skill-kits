@@ -12,14 +12,20 @@ use skill_kits::core::{
     registry::{read_skills_registry, ToggleState},
     skills::validate_skill_dir,
 };
+use skill_kits::gui::state::{GuiModel, GuiScope, NavigationView};
 use tempfile::TempDir;
 
 fn utf8(path: impl AsRef<std::path::Path>) -> Utf8PathBuf {
     Utf8PathBuf::from_path_buf(path.as_ref().to_path_buf()).unwrap()
 }
 
-#[test]
-fn release_smoke_fixture_supports_install_adopt_deploy_and_status_states() {
+struct ReleaseSmokeState {
+    _temp_dir: TempDir,
+    paths: AppPaths,
+    project: Utf8PathBuf,
+}
+
+fn seeded_release_smoke_state() -> ReleaseSmokeState {
     let fixture = Utf8PathBuf::from("tests/fixtures/release-smoke");
     let install_source = fixture.join("source-skill");
     let project_source = fixture.join("project/.agents/skills/project-seed");
@@ -117,6 +123,60 @@ fn release_smoke_fixture_supports_install_adopt_deploy_and_status_states() {
         project_deployment_status(&paths, &project, &AgentId::new("codex"), "source-skill")
             .unwrap();
     assert!(missing.missing_managed_source);
+
+    ReleaseSmokeState {
+        _temp_dir: temp_dir,
+        paths,
+        project,
+    }
+}
+
+#[test]
+fn release_smoke_fixture_supports_install_adopt_deploy_and_status_states() {
+    let _state = seeded_release_smoke_state();
+}
+
+#[test]
+fn release_smoke_fixture_loads_expected_gui_model_acceptance_state() {
+    let state = seeded_release_smoke_state();
+
+    let mut model = GuiModel::load(&state.paths).unwrap();
+    let dashboard = model.renderable_view();
+    assert_eq!(dashboard.view, NavigationView::Dashboard);
+    assert_eq!(dashboard.main_rows[0].cells, vec!["Managed Skills", "1"]);
+    assert_eq!(dashboard.main_rows[1].cells, vec!["Agents", "3/3 enabled"]);
+    assert_eq!(dashboard.main_rows[2].cells, vec!["Recent Projects", "1"]);
+    assert!(dashboard
+        .inspector_sections
+        .iter()
+        .any(|section| section.title == "Health"
+            && section
+                .lines
+                .contains(&"Missing managed sources 1".to_string())));
+
+    model.navigate(NavigationView::Agents);
+    let agents = model.renderable_view();
+    assert_eq!(agents.main_rows.len(), 4);
+    assert!(agents
+        .main_rows
+        .iter()
+        .any(|row| row.id == "codex" && row.cells[1] == ".agents/skills"));
+    assert!(agents.main_rows.iter().any(|row| row.id == "custom-agents"));
+
+    model.navigate(NavigationView::Projects);
+    model.select_scope(GuiScope::Project(state.project));
+    let projects = model.renderable_view();
+    assert!(projects
+        .main_rows
+        .iter()
+        .any(|row| row.cells[0] == "source-skill"
+            && row.cells[2] == "Disabled"
+            && row.cells[4] == "Drift"
+            && row.cells[5] == "Missing managed source"));
+    assert!(projects
+        .main_rows
+        .iter()
+        .any(|row| row.cells[0] == "project-seed" && row.cells[2] == "Enabled"));
 }
 
 fn copy_dir(source: &camino::Utf8Path, target: &camino::Utf8Path) {
