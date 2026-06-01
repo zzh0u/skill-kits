@@ -84,7 +84,6 @@ pub fn built_in_agents() -> Vec<BuiltInAgent> {
                 "~/.codex/skills",
                 "~/.codex/plugins/cache",
                 "~/.codex/vendor_imports",
-                "~/.skills-manager/skills",
             ],
             project_dir: ".agents/skills",
         },

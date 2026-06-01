@@ -109,15 +109,17 @@ impl SkillAction {
 
 pub fn skill_actions(model: &GuiModel) -> Vec<SkillAction> {
     let mut actions = vec![SkillAction::InstallLocal, SkillAction::AdoptAgentSkills];
-    if model.selected_skill().is_none() {
+    if model.selected_skill().is_none() && model.selected_skill_instance().is_none() {
         return actions;
     }
 
-    actions.push(SkillAction::Scan);
-    if model.has_explicit_project_deploy_target() {
-        actions.push(SkillAction::Deploy);
+    if model.selected_skill().is_some() {
+        actions.push(SkillAction::Scan);
+        if model.has_explicit_project_deploy_target() {
+            actions.push(SkillAction::Deploy);
+        }
+        actions.push(SkillAction::Uninstall);
     }
-    actions.push(SkillAction::Uninstall);
     actions
 }
 

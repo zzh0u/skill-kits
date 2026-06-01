@@ -376,7 +376,7 @@ fn configured_global_skill_dirs_uses_configured_custom_and_built_in_dirs() {
     assert!(codex_dirs.contains(&camino::Utf8PathBuf::from("~/.codex/skills")));
     assert!(codex_dirs.contains(&camino::Utf8PathBuf::from("~/.codex/plugins/cache")));
     assert!(codex_dirs.contains(&camino::Utf8PathBuf::from("~/.codex/vendor_imports")));
-    assert!(codex_dirs.contains(&camino::Utf8PathBuf::from("~/.skills-manager/skills")));
+    assert!(!codex_dirs.contains(&camino::Utf8PathBuf::from("~/.skills-manager/skills")));
     assert_eq!(
         configured_global_skill_dirs_for(&paths, &AgentId::new("custom")).unwrap(),
         vec![camino::Utf8PathBuf::from("/tmp/custom-skills")]

@@ -100,6 +100,13 @@ fn write_skill(path: &camino::Utf8Path, body: &str) {
     std::fs::write(path.join("SKILL.md"), body).unwrap();
 }
 
+fn write_global_codex_skill(temp_dir: &TempDir, name: &str, body: &str) -> Utf8PathBuf {
+    let skill_dir =
+        Utf8PathBuf::from_path_buf(temp_dir.path().join(".codex/skills").join(name)).unwrap();
+    write_skill(&skill_dir, body);
+    skill_dir
+}
+
 fn write_config_with_codex_project(paths: &AppPaths, project: &camino::Utf8Path) {
     write_config(
         paths,
@@ -136,6 +143,52 @@ fn section_lines(model: &GuiModel, title: &str) -> Vec<String> {
         .find(|section| section.title == title)
         .unwrap_or_else(|| panic!("missing {title} inspector section"))
         .lines
+}
+
+#[test]
+fn skills_view_renders_agent_space_instances_instead_of_managed_inventory_columns() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_config(&paths, &Config::default()).unwrap();
+    write_skills_registry(
+        &paths,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![managed_skill(&paths)],
+        },
+    )
+    .unwrap();
+    let skill_dir = write_global_codex_skill(&temp_dir, "agent-visible", "# Agent Visible\n");
+
+    let mut model = GuiModel::load_with_home_dir(
+        &paths,
+        Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).unwrap(),
+    )
+    .unwrap();
+    model.navigate(NavigationView::Skills);
+    let renderable = model.renderable_view();
+
+    assert_eq!(
+        renderable.columns,
+        vec!["Skill", "Agent", "Scope", "Status", "Source", "Managed", "Updated"]
+    );
+    assert_eq!(renderable.main_rows.len(), 1);
+    let row = &renderable.main_rows[0];
+    assert_eq!(row.cells[0], "Agent Visible");
+    assert_eq!(row.cells[1], "Codex");
+    assert_eq!(row.cells[2], "Global");
+    assert_eq!(row.cells[3], "Enabled");
+    assert_eq!(row.cells[4], "Codex global");
+    assert_eq!(row.cells[5], "Unmanaged");
+    assert!(model.select_render_row(&row.id));
+    assert_eq!(
+        model.selected_skill_instance().unwrap().skill_dir,
+        skill_dir
+    );
+    assert!(section_lines(&model, "Paths")
+        .iter()
+        .any(|line| line == &format!("Skill dir {skill_dir}")));
 }
 
 #[test]
@@ -183,7 +236,7 @@ fn each_navigation_view_loads_from_app_paths_model() {
         let renderable = model.renderable_view();
         assert_eq!(renderable.view, view);
         assert!(!renderable.title.is_empty());
-        assert!(renderable.main_rows.len() <= 4);
+        assert!(renderable.main_rows.len() <= 5);
         assert!(!renderable.inspector_sections.is_empty());
     }
 }
@@ -220,7 +273,7 @@ fn selecting_render_rows_updates_view_selection_without_filesystem_mutation() {
 
     let mut model = GuiModel::load(&paths).unwrap();
     model.navigate(NavigationView::Skills);
-    assert!(model.select_render_row(second.id.as_str()));
+    model.select_managed_skill(second.id.clone());
     assert_eq!(
         model.request_scan_selected_skill(),
         Some(GuiActionIntent::ScanSkill {
@@ -507,7 +560,7 @@ fn gui_empty_states_are_contextual_and_actionable() {
     assert!(renderable.main_rows.is_empty());
     assert_eq!(
         renderable.empty_message,
-        Some("No managed Skills yet. Install a local Skill or adopt existing Agent Skills.")
+        Some("No Agent Space Skills found. Scan enabled Agent directories.")
     );
     assert_eq!(
         skill_actions(&model),
@@ -520,9 +573,8 @@ fn gui_empty_states_are_contextual_and_actionable() {
     assert_eq!(
         section_lines(&model, "Empty"),
         vec![
-            "No managed Skills yet.".to_string(),
-            "Install a local Skill directory, or adopt Skills from enabled Agent directories."
-                .to_string(),
+            "No Agent Space Skills found.".to_string(),
+            "Scan enabled Agent directories or install a managed source.".to_string(),
         ]
     );
 
@@ -688,11 +740,11 @@ fn gui_adopt_all_agent_skills_recursively_imports_codex_skill_libraries() {
             .iter()
             .map(|skill| skill.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["browser-skill", "managed-library-skill", "vendor-skill"]
+        vec!["browser-skill", "vendor-skill"]
     );
     assert_eq!(
         model.last_status().unwrap().message,
-        "Adopted Agent Skills into Global Inventory: 3 imported, 0 conflicts."
+        "Adopted Agent Skills into Global Inventory: 2 imported, 0 conflicts."
     );
 }
 
@@ -1104,30 +1156,23 @@ fn scanning_selected_skill_surfaces_risk_summary_and_findings() {
     model.select_skill(skill.id.clone());
 
     let initial = model.renderable_view();
-    assert_eq!(initial.main_rows[0].cells[2], "Not scanned");
+    assert!(initial.main_rows.is_empty());
     assert_eq!(
-        section_lines(&model, "Risk Findings"),
-        vec!["Not scanned yet.".to_string()]
+        initial.empty_message,
+        Some("No Agent Space Skills found. Scan enabled Agent directories.")
     );
 
     model.request_scan_selected_skill().unwrap();
     let controller = GuiController::new(paths);
     assert!(model.execute_next_intent(&controller).unwrap().is_some());
 
-    let renderable = model.renderable_view();
-    assert_eq!(renderable.main_rows[0].cells[2], "2 high, 1 warn");
     assert_eq!(
         model.last_status().unwrap().message,
         "Scanned frontend-design: 2 high, 1 warn."
     );
     assert_eq!(
-        section_lines(&model, "Risk Findings"),
-        vec![
-            "2 high, 1 warn.".to_string(),
-            "remote-shell-pipe line 4 - network pipe to shell".to_string(),
-            "network-fetch line 4 - network fetch instruction".to_string(),
-            "destructive-delete line 5 - destructive filesystem command".to_string(),
-        ]
+        model.skill_risk_report(&skill.id).unwrap().summary_label(),
+        "2 high, 1 warn"
     );
 }
 
@@ -1208,21 +1253,19 @@ fn scanning_clean_skill_surfaces_no_findings_summary() {
 
     let mut model = GuiModel::load(&paths).unwrap();
     model.navigate(NavigationView::Skills);
-    model.select_skill(skill.id);
+    model.select_skill(skill.id.clone());
     model.request_scan_selected_skill().unwrap();
 
     let controller = GuiController::new(paths);
     assert!(model.execute_next_intent(&controller).unwrap().is_some());
 
-    let renderable = model.renderable_view();
-    assert_eq!(renderable.main_rows[0].cells[2], "No findings");
     assert_eq!(
         model.last_status().unwrap().message,
         "Scanned frontend-design: No findings."
     );
     assert_eq!(
-        section_lines(&model, "Risk Findings"),
-        vec!["No findings.".to_string()]
+        model.skill_risk_report(&skill.id).unwrap().summary_label(),
+        "No findings"
     );
 }
 
@@ -1313,8 +1356,13 @@ fn stale_scan_report_is_invalidated_when_skill_hash_changes_after_reload() {
             .scanned_hash,
         skill.content_hash
     );
-    let renderable = model.renderable_view();
-    assert_ne!(renderable.main_rows[0].cells[2], "Not scanned");
+    assert_ne!(
+        model
+            .skill_risk_report(&changed_skill.id)
+            .unwrap()
+            .summary_label(),
+        "Not scanned"
+    );
 }
 
 #[test]
@@ -3036,8 +3084,11 @@ rm -rf "$HOME/tmp"
         "2 high, 1 warn"
     );
     assert_eq!(
-        model.renderable_view().main_rows[0].cells[2],
-        "2 high, 1 warn".to_string()
+        model
+            .skill_risk_report(&model.skills[0].id)
+            .unwrap()
+            .summary_label(),
+        "2 high, 1 warn"
     );
     assert_eq!(
         model.last_status().unwrap().message,
@@ -3087,6 +3138,11 @@ fn skills_inspector_renders_metadata_and_registry_metadata_from_loaded_model() {
     write_config(&paths, &Config::default()).unwrap();
 
     let skill = managed_skill_with_metadata(&paths);
+    write_global_codex_skill(
+        &temp_dir,
+        "frontend-design",
+        "+++\ntitle = \"Frontend Design Systems\"\ndescription = \"Builds polished interface systems from existing product context.\"\n+++\n",
+    );
     write_skills_registry(
         &paths,
         &SkillsRegistry {
@@ -3099,7 +3155,14 @@ fn skills_inspector_renders_metadata_and_registry_metadata_from_loaded_model() {
 
     let mut model = GuiModel::load(&paths).unwrap();
     model.navigate(NavigationView::Skills);
-    model.select_skill(skill.id.clone());
+    let row_id = model
+        .skill_instances
+        .iter()
+        .find(|instance| instance.stable_id.as_ref() == Some(&skill.id))
+        .expect("managed instance")
+        .id
+        .clone();
+    assert!(model.select_render_row(&row_id));
 
     let renderable = model.renderable_view();
     let metadata = renderable
@@ -3121,14 +3184,20 @@ fn skills_inspector_renders_metadata_and_registry_metadata_from_loaded_model() {
         .iter()
         .find(|section| section.title == "Registry Metadata")
         .expect("missing Registry Metadata inspector section");
-    assert_eq!(
-        registry_metadata.lines,
-        vec![
-            "ID frontend-design-a1b2c3d4".to_string(),
-            "Hash metadata-hash".to_string(),
-            "Updated 2026-05-31T12:34:56Z".to_string(),
-        ]
-    );
+    let content_hash = model
+        .selected_skill_instance()
+        .and_then(|instance| instance.content_hash.clone())
+        .expect("content hash");
+    assert!(registry_metadata
+        .lines
+        .contains(&"Stable ID frontend-design-a1b2c3d4".to_string()));
+    assert!(registry_metadata
+        .lines
+        .contains(&format!("Hash {content_hash}")));
+    assert!(registry_metadata
+        .lines
+        .iter()
+        .any(|line| line.starts_with("Updated ")));
 }
 
 #[test]
@@ -3167,22 +3236,23 @@ fn skills_inspector_renders_project_deployments_from_loaded_model() {
 
     let mut model = GuiModel::load(&paths).unwrap();
     model.navigate(NavigationView::Skills);
-    model.select_skill(skill.id.clone());
+    let row_id = model
+        .skill_instances
+        .iter()
+        .find(|instance| instance.skill_dir == deployed_path)
+        .expect("project instance")
+        .id
+        .clone();
+    assert!(model.select_render_row(&row_id));
 
     let renderable = model.renderable_view();
-    let deployments = renderable
+    let paths = renderable
         .inspector_sections
         .iter()
-        .find(|section| section.title == "Project Deployments")
-        .expect("missing Project Deployments inspector section");
+        .find(|section| section.title == "Paths")
+        .expect("missing Paths inspector section");
 
-    assert_eq!(
-        deployments.lines,
-        vec![format!(
-            "sample-app | codex | Enabled | {}",
-            project.join(".agents/skills/frontend-design")
-        )]
-    );
+    assert!(paths.lines.contains(&format!("Skill dir {deployed_path}")));
 }
 
 #[test]

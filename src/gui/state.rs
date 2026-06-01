@@ -3,6 +3,7 @@ use crate::core::{
         global_agent_adopt_resilient, project_adopt, project_adopt_all,
         project_adopt_conflict_as_new, GlobalAgentAdoptRequest, ProjectAdoptRequest,
     },
+    agent_space::{scan_agent_spaces, SkillInstance},
     agents::{
         add_custom_agent_config, remove_custom_agent_config, reset_agent_project_skill_dirs,
         update_agent_project_skill_dirs, AgentConfig, AgentKind,
@@ -276,6 +277,13 @@ impl GuiController {
 
     pub fn paths(&self) -> &AppPaths {
         &self.paths
+    }
+
+    fn load_model(&self) -> Result<GuiModel> {
+        match &self.home_dir {
+            Some(home_dir) => GuiModel::load_with_home_dir(&self.paths, home_dir.clone()),
+            None => GuiModel::load(&self.paths),
+        }
     }
 
     pub fn execute(&self, intent: &GuiActionIntent) -> Result<GuiControllerOutcome> {
@@ -568,6 +576,7 @@ impl GuiController {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DashboardSummary {
+    pub agent_space_instance_count: usize,
     pub managed_skill_count: usize,
     pub agent_count: usize,
     pub enabled_agent_count: usize,
@@ -712,6 +721,7 @@ pub struct GuiModel {
     pub active_view: NavigationView,
     pub active_scope: GuiScope,
     pub dashboard: DashboardSummary,
+    pub skill_instances: Vec<SkillInstance>,
     pub skills: Vec<ManagedSkill>,
     pub agents: Vec<AgentConfig>,
     pub recent_projects: Vec<RecentProject>,
@@ -719,6 +729,7 @@ pub struct GuiModel {
     pub deployments: Vec<DeploymentRecord>,
     pub deployment_statuses: Vec<DeploymentStatus>,
     selected_skill: Option<SkillId>,
+    selected_skill_instance: Option<String>,
     selected_agent: Option<AgentId>,
     selected_project: Option<Utf8PathBuf>,
     selected_deployment: Option<String>,
@@ -735,7 +746,18 @@ pub struct GuiModel {
 
 impl GuiModel {
     pub fn load(paths: &AppPaths) -> Result<Self> {
+        let home = paths
+            .data_root
+            .file_name()
+            .filter(|name| *name == ".skill-kits")
+            .and_then(|_| paths.data_root.parent().map(ToOwned::to_owned))
+            .map_or_else(default_home_dir, Ok)?;
+        Self::load_with_home_dir(paths, home)
+    }
+
+    pub fn load_with_home_dir(paths: &AppPaths, home_dir: Utf8PathBuf) -> Result<Self> {
         let config = read_config(paths)?;
+        let skill_instances = scan_agent_spaces(paths, &home_dir)?;
         let skills = read_skills_registry(paths)?.skills;
         let deployments = read_deployments_registry(paths)?.deployments;
         let deployment_statuses = deployments
@@ -772,6 +794,7 @@ impl GuiModel {
             .collect::<Vec<_>>();
         let status = global_status(paths)?;
         let dashboard = DashboardSummary {
+            agent_space_instance_count: skill_instances.len(),
             managed_skill_count: status.managed_skill_count,
             agent_count: status.agent_count,
             enabled_agent_count: status.enabled_agent_count,
@@ -813,6 +836,7 @@ impl GuiModel {
             active_view: NavigationView::Dashboard,
             active_scope: GuiScope::GlobalInventory,
             dashboard,
+            skill_instances,
             skills,
             agents: config.agents,
             recent_projects: config.recent_projects,
@@ -820,6 +844,7 @@ impl GuiModel {
             deployments,
             deployment_statuses,
             selected_skill: None,
+            selected_skill_instance: None,
             selected_agent: None,
             selected_project,
             selected_deployment: None,
@@ -860,6 +885,10 @@ impl GuiModel {
         self.selected_skill = Some(skill_id);
     }
 
+    pub fn select_managed_skill(&mut self, skill_id: SkillId) {
+        self.select_skill(skill_id);
+    }
+
     pub fn select_agent(&mut self, agent_id: AgentId) {
         self.selected_agent = Some(agent_id);
     }
@@ -887,8 +916,12 @@ impl GuiModel {
         match self.active_view {
             NavigationView::Dashboard => false,
             NavigationView::Skills => {
-                if self.skills.iter().any(|skill| skill.id.as_str() == row_id) {
-                    self.select_skill(SkillId::new(row_id));
+                if self
+                    .skill_instances
+                    .iter()
+                    .any(|instance| instance.id == row_id)
+                {
+                    self.select_skill_instance(row_id.to_string());
                     true
                 } else {
                     false
@@ -1363,6 +1396,7 @@ impl GuiModel {
         let active_view = self.active_view;
         let active_scope = self.active_scope.clone();
         let selected_skill = self.selected_skill.clone();
+        let selected_skill_instance = self.selected_skill_instance.clone();
         let selected_agent = self.selected_agent.clone();
         let selected_project = self.selected_project.clone();
         let selected_deployment = self.selected_deployment.clone();
@@ -1404,7 +1438,7 @@ impl GuiModel {
             _ => None,
         };
         let success_message = self.intent_success_message(&intent, &outcome);
-        *self = Self::load(controller.paths())?;
+        *self = controller.load_model()?;
         for (path, pending_conflicts, skipped_conflicts, discovered_skills) in
             project_conflict_state
         {
@@ -1429,6 +1463,11 @@ impl GuiModel {
                     .iter()
                     .any(|skill| skill.id.as_str() == selected.as_str())
             });
+        self.selected_skill_instance = selected_skill_instance.filter(|selected| {
+            self.skill_instances
+                .iter()
+                .any(|instance| instance.id == *selected)
+        });
         self.selected_agent = selected_agent_after_save
             .or(selected_agent)
             .filter(|selected| {
@@ -1842,6 +1881,18 @@ impl GuiModel {
         })
     }
 
+    pub fn select_skill_instance(&mut self, instance_id: String) {
+        self.selected_skill_instance = Some(instance_id);
+    }
+
+    pub fn selected_skill_instance(&self) -> Option<&SkillInstance> {
+        self.selected_skill_instance.as_ref().and_then(|selected| {
+            self.skill_instances
+                .iter()
+                .find(|instance| instance.id == *selected)
+        })
+    }
+
     pub fn selected_agent(&self) -> Option<&AgentConfig> {
         self.selected_agent.as_ref().and_then(|selected| {
             self.agents
@@ -1913,6 +1964,7 @@ impl Default for GuiModel {
             active_view: NavigationView::Dashboard,
             active_scope: GuiScope::GlobalInventory,
             dashboard: DashboardSummary {
+                agent_space_instance_count: 0,
                 managed_skill_count: 0,
                 agent_count: 0,
                 enabled_agent_count: 0,
@@ -1928,12 +1980,14 @@ impl Default for GuiModel {
                 risk_count: 0,
             },
             skills: Vec::new(),
+            skill_instances: Vec::new(),
             agents: Vec::new(),
             recent_projects: Vec::new(),
             project_summaries: Vec::new(),
             deployments: Vec::new(),
             deployment_statuses: Vec::new(),
             selected_skill: None,
+            selected_skill_instance: None,
             selected_agent: None,
             selected_project: None,
             selected_deployment: None,

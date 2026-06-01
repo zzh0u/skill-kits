@@ -7,6 +7,11 @@ pub fn view_name() -> &'static str {
 pub fn renderable(model: &GuiModel) -> RenderableView {
     let summary = &model.dashboard;
     let main_rows = vec![
+        row(
+            "agent-space",
+            "Agent Space Skills",
+            summary.agent_space_instance_count,
+        ),
         row("managed", "Managed Skills", summary.managed_skill_count),
         RenderRow {
             id: "agents".to_string(),

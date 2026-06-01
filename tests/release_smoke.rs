@@ -143,9 +143,13 @@ fn release_smoke_fixture_loads_expected_gui_model_acceptance_state() {
     let mut model = GuiModel::load(&state.paths).unwrap();
     let dashboard = model.renderable_view();
     assert_eq!(dashboard.view, NavigationView::Dashboard);
-    assert_eq!(dashboard.main_rows[0].cells, vec!["Managed Skills", "1"]);
-    assert_eq!(dashboard.main_rows[1].cells, vec!["Agents", "3/3 enabled"]);
-    assert_eq!(dashboard.main_rows[2].cells, vec!["Recent Projects", "1"]);
+    assert_eq!(
+        dashboard.main_rows[0].cells,
+        vec!["Agent Space Skills", "2"]
+    );
+    assert_eq!(dashboard.main_rows[1].cells, vec!["Managed Skills", "1"]);
+    assert_eq!(dashboard.main_rows[2].cells, vec!["Agents", "3/3 enabled"]);
+    assert_eq!(dashboard.main_rows[3].cells, vec!["Recent Projects", "1"]);
     assert!(dashboard
         .inspector_sections
         .iter()
