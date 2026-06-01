@@ -533,6 +533,59 @@ fn projects_onboarding_copy_distinguishes_not_scanned_from_no_unmanaged_skills()
 }
 
 #[test]
+fn open_project_draft_records_recent_project_and_selects_project_scope_without_scanning() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let project = project_path(&temp_dir, "opened-app");
+    write_skill(&project.join(".agents/skills/unmanaged"), "# Unmanaged\n");
+    let canonical_project =
+        Utf8PathBuf::from_path_buf(std::fs::canonicalize(&project).unwrap()).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+    write_config(&paths, &Config::default()).unwrap();
+    write_skills_registry(&paths, &SkillsRegistry::default()).unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+
+    let mut model = GuiModel::load(&paths).unwrap();
+    model.navigate(NavigationView::Projects);
+    model.begin_open_project();
+    model.update_open_project_path(project.join(".").to_string());
+
+    assert_eq!(
+        model.request_save_open_project(),
+        Some(GuiActionIntent::OpenProject {
+            project_path: canonical_project.clone(),
+        })
+    );
+
+    let controller = GuiController::new(paths.clone());
+    assert_eq!(
+        model.execute_next_intent(&controller).unwrap(),
+        Some(GuiActionIntent::OpenProject {
+            project_path: canonical_project.clone(),
+        })
+    );
+
+    assert!(
+        matches!(model.active_scope, GuiScope::Project(ref path) if path == &canonical_project)
+    );
+    assert_eq!(model.open_project_draft(), None);
+    assert_eq!(
+        read_config(&paths).unwrap().recent_projects[0].path,
+        canonical_project
+    );
+    let summary = model
+        .project_summaries
+        .iter()
+        .find(|summary| summary.path == canonical_project)
+        .expect("open project should add a recent project summary");
+    assert_eq!(summary.name, "opened-app");
+    assert!(!summary.onboarding_scanned);
+    assert_eq!(summary.discovered_unmanaged_count, 0);
+    assert!(read_skills_registry(&paths).unwrap().skills.is_empty());
+    assert!(project.join(".agents/skills/unmanaged/SKILL.md").exists());
+}
+
+#[test]
 fn gui_status_feedback_records_last_success_and_last_error() {
     let temp_dir = TempDir::new().unwrap();
     let paths = test_paths(&temp_dir);

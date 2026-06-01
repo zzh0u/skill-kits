@@ -4,12 +4,16 @@ use crate::core::{
     config::{read_config, RecentProject},
     ids::{AgentId, SkillId},
     install::{install_local_skill, uninstall_skill, InstallLocalRequest, UninstallSkillRequest},
-    onboarding::{project_onboarding_scan, DiscoveredProjectSkill, ProjectOnboardingScanRequest},
+    onboarding::{
+        project_onboarding_scan, record_recent_project, DiscoveredProjectSkill,
+        ProjectOnboardingScanRequest,
+    },
     paths::AppPaths,
     project::{
         deploy_project_skill, disable_project_skill, enable_project_skill,
         project_deployment_status, redeploy_project_skill, remove_project_skill,
-        ProjectDeployRequest, ProjectRedeployRequest, ProjectRemoveRequest, ProjectSkillRequest,
+        resolve_project_scope, ProjectDeployRequest, ProjectRedeployRequest, ProjectRemoveRequest,
+        ProjectSkillRequest,
     },
     registry::{
         read_deployments_registry, read_skills_registry, DeploymentRecord, DeploymentStatus,
@@ -142,6 +146,9 @@ pub enum GuiControllerOutcome {
         adopt_result: Option<ProjectAdoptAllSummary>,
         pending_conflicts: Vec<ProjectConflict>,
         preserve_existing_conflicts: bool,
+    },
+    ProjectOpened {
+        project_path: Utf8PathBuf,
     },
 }
 
@@ -372,7 +379,13 @@ impl GuiController {
                     preserve_existing_conflicts: false,
                 }
             }
-            GuiActionIntent::OpenProject { .. } => GuiControllerOutcome::None,
+            GuiActionIntent::OpenProject { project_path } => {
+                let project = resolve_project_scope(Some(project_path))?;
+                record_recent_project(&self.paths, &project.path)?;
+                GuiControllerOutcome::ProjectOpened {
+                    project_path: project.path,
+                }
+            }
             GuiActionIntent::UpdateAgentProjectSkillDirs {
                 agent_id,
                 project_skill_dirs,
@@ -523,6 +536,11 @@ pub struct InstallLocalSkillDraft {
     pub path_text: String,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OpenProjectDraft {
+    pub path_text: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectDeployTarget {
     pub project_path: Utf8PathBuf,
@@ -555,6 +573,7 @@ pub struct GuiModel {
     skill_risk_reports: Vec<(SkillId, GuiRiskReport)>,
     agent_editor_draft: Option<AgentEditorDraft>,
     install_local_skill_draft: Option<InstallLocalSkillDraft>,
+    open_project_draft: Option<OpenProjectDraft>,
 }
 
 impl GuiModel {
@@ -653,6 +672,7 @@ impl GuiModel {
             skill_risk_reports: Vec::new(),
             agent_editor_draft: None,
             install_local_skill_draft: None,
+            open_project_draft: None,
         })
     }
 
@@ -812,6 +832,31 @@ impl GuiModel {
 
     pub fn cancel_install_local_skill(&mut self) {
         self.install_local_skill_draft = None;
+    }
+
+    pub fn begin_open_project(&mut self) {
+        self.open_project_draft = Some(OpenProjectDraft::default());
+    }
+
+    pub fn update_open_project_path(&mut self, value: String) {
+        if let Some(draft) = &mut self.open_project_draft {
+            draft.path_text = value;
+        }
+    }
+
+    pub fn request_save_open_project(&mut self) -> Option<GuiActionIntent> {
+        let project_path = self.open_project_draft.as_ref()?.path_text.trim();
+        if project_path.is_empty() {
+            return None;
+        }
+        let project = resolve_project_scope(Some(camino::Utf8Path::new(project_path))).ok()?;
+        self.push_intent(GuiActionIntent::OpenProject {
+            project_path: project.path,
+        })
+    }
+
+    pub fn cancel_open_project(&mut self) {
+        self.open_project_draft = None;
     }
 
     pub fn request_uninstall_selected_skill(&mut self, confirmed: bool) -> Option<GuiActionIntent> {
@@ -1184,6 +1229,7 @@ impl GuiModel {
             .collect();
         self.agent_editor_draft = None;
         self.install_local_skill_draft = None;
+        self.open_project_draft = None;
         self.last_status = Some(GuiStatus {
             kind: GuiStatusKind::Success,
             message: success_message,
@@ -1446,6 +1492,36 @@ impl GuiModel {
                     });
                 }
             }
+            GuiControllerOutcome::ProjectOpened { project_path } => {
+                let deployment_count = self
+                    .deployments
+                    .iter()
+                    .filter(|deployment| deployment.project_path == project_path)
+                    .count();
+                if !self
+                    .project_summaries
+                    .iter()
+                    .any(|summary| summary.path == project_path)
+                {
+                    self.project_summaries.push(ProjectSummary {
+                        name: project_path
+                            .file_name()
+                            .map(ToOwned::to_owned)
+                            .unwrap_or_else(|| project_path.to_string()),
+                        path: project_path.clone(),
+                        deployment_count,
+                        onboarding_scanned: false,
+                        discovered_unmanaged_count: 0,
+                        last_adopt_all_result: None,
+                        pending_conflicts: Vec::new(),
+                        skipped_conflicts: Vec::new(),
+                    });
+                }
+                self.active_scope = GuiScope::Project(project_path.clone());
+                self.selected_project = Some(project_path);
+                self.selected_deployment = None;
+                self.pending_remove_confirmation = None;
+            }
         }
     }
 
@@ -1480,6 +1556,10 @@ impl GuiModel {
 
     pub fn install_local_skill_draft(&self) -> Option<&InstallLocalSkillDraft> {
         self.install_local_skill_draft.as_ref()
+    }
+
+    pub fn open_project_draft(&self) -> Option<&OpenProjectDraft> {
+        self.open_project_draft.as_ref()
     }
 
     pub fn selected_project_summary(&self) -> Option<&ProjectSummary> {
@@ -1556,6 +1636,7 @@ impl Default for GuiModel {
             skill_risk_reports: Vec::new(),
             agent_editor_draft: None,
             install_local_skill_draft: None,
+            open_project_draft: None,
         }
     }
 }

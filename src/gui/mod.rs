@@ -407,6 +407,25 @@ fn render_action_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCol
             render_skill_controls(ui, model, colors);
         }
         NavigationView::Projects => {
+            if let Some(draft) = model.open_project_draft().cloned() {
+                let mut path_text = draft.path_text;
+                ui.label(egui::RichText::new("Project path").color(colors.ink_subtle));
+                ui.text_edit_singleline(&mut path_text);
+                model.update_open_project_path(path_text);
+                ui.horizontal(|ui| {
+                    if ui.button("Open").clicked() {
+                        let _ = model.request_save_open_project();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        model.cancel_open_project();
+                    }
+                });
+                return;
+            }
+            if ui.button("Open project").clicked() {
+                model.begin_open_project();
+            }
+            ui.add_space(4.0);
             if model.pending_remove_confirmation().is_some() {
                 ui.label(
                     egui::RichText::new(DRIFT_REMOVE_CONFIRMATION_MESSAGE).color(colors.warning),
