@@ -19,7 +19,7 @@ use skill_kits::gui::state::{
     GLOBAL_UNINSTALL_CONFIRMATION_MESSAGE,
 };
 use skill_kits::gui::{
-    agent_actions, inspector_line_presentation, native_options, path_validation_message,
+    agent_actions, icons, inspector_line_presentation, native_options, path_validation_message,
     project_actions, skill_actions, workbench_cell_style, workbench_row_accepts_keyboard_key,
     AgentAction, InspectorLineKind, InspectorLinePresentation, PathFieldKind, ProjectAction,
     SkillAction, SkillKitsGuiApp, WorkbenchCellStyle,
@@ -145,6 +145,49 @@ fn section_lines(model: &GuiModel, title: &str) -> Vec<String> {
         .find(|section| section.title == title)
         .unwrap_or_else(|| panic!("missing {title} inspector section"))
         .lines
+}
+
+#[test]
+fn gui_icons_map_navigation_actions_and_status_without_mixing_plugin_toggles() {
+    assert_eq!(
+        icons::navigation_icon(NavigationView::Dashboard),
+        icons::DASHBOARD
+    );
+    assert_eq!(icons::navigation_icon(NavigationView::Skills), icons::SKILL);
+    assert_eq!(icons::navigation_icon(NavigationView::Agents), icons::AGENT);
+    assert_eq!(
+        icons::navigation_icon(NavigationView::Projects),
+        icons::PROJECT
+    );
+
+    assert_eq!(
+        icons::skill_action_icon(SkillAction::ScanAgentSpaces),
+        icons::SCAN
+    );
+    assert_eq!(
+        icons::skill_action_icon(SkillAction::Enable),
+        icons::ENABLE_SKILL
+    );
+    assert_eq!(
+        icons::skill_action_icon(SkillAction::Disable),
+        icons::DISABLE_SKILL
+    );
+    assert_ne!(icons::ENABLE_SKILL, icons::ENABLE_PLUGIN);
+    assert_ne!(icons::DISABLE_SKILL, icons::DISABLE_PLUGIN);
+
+    assert_eq!(icons::status_icon("Enabled"), icons::STATUS_ENABLED);
+    assert_eq!(icons::status_icon("Disabled"), icons::STATUS_DISABLED);
+    assert_eq!(icons::status_icon("Invalid"), icons::STATUS_INVALID);
+    assert_eq!(
+        icons::status_icon("Missing managed source"),
+        icons::STATUS_INVALID
+    );
+    assert_eq!(icons::status_icon("Read-only"), icons::READ_ONLY);
+
+    assert_eq!(
+        icons::button_label(icons::REFRESH, "Refresh"),
+        "\u{f021} Refresh"
+    );
 }
 
 #[test]
@@ -644,10 +687,7 @@ fn skills_inspector_names_invalid_and_read_only_states_explicitly() {
                 id: AgentId::new("codex"),
                 label: "Codex".to_string(),
                 kind: AgentKind::BuiltIn,
-                global_skill_dirs: vec![
-                    "~/.codex/skills".into(),
-                    "~/.codex/plugins/cache".into(),
-                ],
+                global_skill_dirs: vec!["~/.codex/skills".into(), "~/.codex/plugins/cache".into()],
                 project_skill_dirs: vec![".agents/skills".into()],
                 enabled: true,
             }],

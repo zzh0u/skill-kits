@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod dashboard;
+pub mod icons;
 pub mod projects;
 pub mod skills;
 pub mod state;
@@ -329,7 +330,10 @@ pub fn run_native(paths: AppPaths) -> anyhow::Result<()> {
     eframe::run_native(
         "Skill-kits",
         native_options(),
-        Box::new(move |_cc| Ok(Box::new(SkillKitsGuiApp::from_paths(&paths)?))),
+        Box::new(move |cc| {
+            icons::install_font(&cc.egui_ctx);
+            Ok(Box::new(SkillKitsGuiApp::from_paths(&paths)?))
+        }),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
@@ -366,7 +370,10 @@ impl eframe::App for SkillKitsGuiApp {
                     ui.label(egui::RichText::new("Skill-kits").strong());
                     ui.separator();
                     ui.label(scope_label(&self.model.active_scope));
-                    if ui.button("Refresh").clicked() {
+                    if ui
+                        .button(icons::button_label(icons::REFRESH, "Refresh"))
+                        .clicked()
+                    {
                         let _ = self.model.request_refresh_selected_project();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -391,7 +398,10 @@ impl eframe::App for SkillKitsGuiApp {
                 ui.add_space(8.0);
                 for view in NavigationView::ORDER {
                     if ui
-                        .selectable_label(self.model.active_view == view, view.title())
+                        .selectable_label(
+                            self.model.active_view == view,
+                            icons::button_label(icons::navigation_icon(view), view.title()),
+                        )
                         .clicked()
                     {
                         self.model.navigate(view);
@@ -714,8 +724,7 @@ fn render_status_badge(ui: &mut egui::Ui, value: &str, colors: UiColors) -> egui
         .inner_margin(egui::Margin::symmetric(7.0, 2.0))
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
-                let dot = egui::RichText::new("•").color(text_color);
-                ui.label(dot);
+                ui.label(egui::RichText::new(icons::status_icon(value)).color(text_color));
                 ui.label(
                     egui::RichText::new(value)
                         .color(colors.ink_muted)
@@ -933,12 +942,19 @@ fn render_inspector_path_line(
             .wrap(),
         );
         response.on_hover_text(&presentation.value);
-        if ui.small_button("Copy").on_hover_text("Copy path").clicked() {
+        if ui
+            .small_button(icons::button_label(icons::COPY, "Copy"))
+            .on_hover_text("Copy path")
+            .clicked()
+        {
             ui.output_mut(|output| output.copied_text = presentation.value.clone());
         }
         let can_reveal = path_exists(&presentation.value);
         if ui
-            .add_enabled(can_reveal, egui::Button::new("Reveal").small())
+            .add_enabled(
+                can_reveal,
+                egui::Button::new(icons::button_label(icons::REVEAL, "Reveal")).small(),
+            )
             .on_hover_text("Reveal in Finder")
             .clicked()
         {
@@ -997,16 +1013,25 @@ fn render_action_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCol
                 );
                 model.update_open_project_path(path_text);
                 ui.horizontal(|ui| {
-                    if ui.button("Open").clicked() {
+                    if ui
+                        .button(icons::button_label(icons::BROWSE, "Open"))
+                        .clicked()
+                    {
                         let _ = model.request_save_open_project();
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui
+                        .button(icons::button_label(icons::CANCEL, "Cancel"))
+                        .clicked()
+                    {
                         model.cancel_open_project();
                     }
                 });
                 return;
             }
-            if ui.button("Open project").clicked() {
+            if ui
+                .button(icons::button_label(icons::BROWSE, "Open project"))
+                .clicked()
+            {
                 model.begin_open_project();
             }
             ui.add_space(4.0);
@@ -1015,7 +1040,10 @@ fn render_action_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCol
                     egui::RichText::new(DRIFT_REMOVE_CONFIRMATION_MESSAGE).color(colors.warning),
                 );
                 if ui
-                    .button(egui::RichText::new("Confirm Remove").color(colors.danger))
+                    .button(
+                        egui::RichText::new(icons::button_label(icons::REMOVE, "Confirm Remove"))
+                            .color(colors.danger),
+                    )
                     .clicked()
                 {
                     let _ = model.confirm_pending_remove();
@@ -1043,7 +1071,7 @@ fn render_skill_action_button(
     _colors: UiColors,
     action: SkillAction,
 ) {
-    let label = action.label();
+    let label = icons::button_label(icons::skill_action_icon(action), action.label());
     let clicked = ui.button(label).clicked();
 
     if !clicked {
@@ -1072,7 +1100,10 @@ fn render_skill_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColo
             egui::RichText::new(SKILL_INSTANCE_DISABLE_CONFIRMATION_MESSAGE).color(colors.warning),
         );
         if ui
-            .button(egui::RichText::new("Confirm Disable").color(colors.danger))
+            .button(
+                egui::RichText::new(icons::button_label(icons::DISABLE_SKILL, "Confirm Disable"))
+                    .color(colors.danger),
+            )
             .clicked()
         {
             let _ = model.confirm_pending_disable_skill_instance();
@@ -1093,7 +1124,7 @@ fn render_agent_action_button(
     colors: UiColors,
     action: AgentAction,
 ) {
-    let label = action.label();
+    let label = icons::button_label(icons::agent_action_icon(action), action.label());
     let clicked = if matches!(action, AgentAction::RemoveCustom) {
         ui.button(egui::RichText::new(label).color(colors.danger))
             .clicked()
@@ -1144,10 +1175,16 @@ fn render_agent_editor_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors:
         model.update_agent_editor_project_dir(project_dir_text);
 
         ui.horizontal(|ui| {
-            if ui.button("Save").clicked() {
+            if ui
+                .button(icons::button_label(icons::SAVE, "Save"))
+                .clicked()
+            {
                 let _ = model.request_save_agent_editor();
             }
-            if ui.button("Cancel").clicked() {
+            if ui
+                .button(icons::button_label(icons::CANCEL, "Cancel"))
+                .clicked()
+            {
                 model.cancel_agent_editor();
             }
         });
@@ -1176,7 +1213,7 @@ fn render_path_field(
                 .desired_width(190.0),
         );
         if ui
-            .button("Browse")
+            .button(icons::button_label(icons::BROWSE, "Browse"))
             .on_hover_text("Choose a folder")
             .clicked()
         {
@@ -1186,14 +1223,20 @@ fn render_path_field(
         }
         let can_reveal = path_exists(value);
         if ui
-            .add_enabled(can_reveal, egui::Button::new("Reveal"))
+            .add_enabled(
+                can_reveal,
+                egui::Button::new(icons::button_label(icons::REVEAL, "Reveal")),
+            )
             .on_hover_text("Reveal in Finder")
             .clicked()
         {
             reveal_path(value);
         }
         if ui
-            .add_enabled(!value.trim().is_empty(), egui::Button::new("Copy"))
+            .add_enabled(
+                !value.trim().is_empty(),
+                egui::Button::new(icons::button_label(icons::COPY, "Copy")),
+            )
             .on_hover_text("Copy path")
             .clicked()
         {
@@ -1266,7 +1309,7 @@ fn render_project_action_button(
     colors: UiColors,
     action: ProjectAction,
 ) {
-    let label = action.label();
+    let label = icons::button_label(icons::project_action_icon(action), action.label());
     let clicked = if matches!(action, ProjectAction::Remove) {
         ui.button(egui::RichText::new(label).color(colors.danger))
             .clicked()
