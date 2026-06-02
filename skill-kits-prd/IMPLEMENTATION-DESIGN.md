@@ -4,7 +4,7 @@
 
 This document turns `PRD-v0.1.md` into an implementation shape. It defines the Rust module boundaries, core data structures, TOML registry schema, command handlers, main workflows, error model, and test strategy for v0.1.
 
-Update: `AGENT-SPACE-MANAGEMENT-SPEC.md` supersedes the managed-inventory-first parts of this implementation design. Keep the existing project deployment and registry machinery, but add an Agent Space read model where filesystem toggle state is the enablement truth and Tranche 1 scans do not write `skills.toml`.
+Hard-cut update: `AGENT-SPACE-MANAGEMENT-SPEC.md` supersedes the managed-inventory-first and project-deployment-first parts of this implementation design. Core `list`, `status`, `project status`, `enable`, and `disable` must use native Agent Space scanning plus a TOML Skill Instance Index. The old Managed Inventory and Project Deployment Registry become legacy state and must not participate in those core read/write paths.
 
 The implementation should stay single-binary first. CLI and GUI must call the same core services rather than duplicating behavior.
 

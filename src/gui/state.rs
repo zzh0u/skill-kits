@@ -5,14 +5,16 @@ use crate::core::{
         ProjectAdoptRequest,
     },
     agent_space::{
-        disable_skill_instance, enable_skill_instance, scan_agent_spaces, SkillInstance,
-        SkillInstanceRequest, SkillInstanceScope, SkillInstanceSourceKind,
+        disable_skill_instance, enable_skill_instance, read_skill_instance_index,
+        refresh_skill_instance_index, scan_agent_spaces, SkillInstance, SkillInstanceRequest,
+        SkillInstanceScope, SkillInstanceSourceKind,
     },
     agents::{
         add_custom_agent_config, remove_custom_agent_config, reset_agent_project_skill_dirs,
         update_agent_project_skill_dirs, AgentConfig, AgentKind,
     },
     config::{read_config, RecentProject},
+    doctor::{run_doctor, DoctorSeverity},
     ids::{AgentId, SkillId},
     install::{install_local_skill, uninstall_skill, InstallLocalRequest, UninstallSkillRequest},
     onboarding::{
@@ -21,17 +23,16 @@ use crate::core::{
     },
     paths::AppPaths,
     project::{
-        deploy_project_skill, disable_project_skill, enable_project_skill,
-        project_deployment_status, redeploy_project_skill, remove_project_skill,
-        resolve_project_scope, ProjectDeployRequest, ProjectRedeployRequest, ProjectRemoveRequest,
-        ProjectSkillRequest,
+        deploy_project_skill, disable_project_skill, enable_project_skill, redeploy_project_skill,
+        remove_project_skill, resolve_project_scope, ProjectDeployRequest, ProjectRedeployRequest,
+        ProjectRemoveRequest, ProjectSkillRequest,
     },
     registry::{
         read_deployments_registry, read_skills_registry, DeploymentRecord, DeploymentStatus,
         ManagedSkill, SkillSource, ToggleState,
     },
     scan::{scan_skill_dir, RiskFinding, RiskSeverity},
-    status::{global_status, HealthState},
+    status::HealthState,
     Result, SkillKitsError,
 };
 use camino::Utf8PathBuf;
@@ -279,6 +280,46 @@ fn default_home_dir() -> Result<Utf8PathBuf> {
     })
 }
 
+fn gui_health(paths: &AppPaths) -> Result<(HealthState, HealthState, HealthState)> {
+    let doctor = run_doctor(paths, false)?;
+    let registry_health = if doctor
+        .issues
+        .iter()
+        .any(|issue| issue.severity == DoctorSeverity::Error)
+    {
+        HealthState::Error
+    } else if doctor
+        .issues
+        .iter()
+        .any(|issue| issue.severity == DoctorSeverity::Warning)
+    {
+        HealthState::Warning
+    } else {
+        HealthState::Ok
+    };
+    let lock_health = if doctor
+        .issues
+        .iter()
+        .any(|issue| matches!(issue.code, crate::core::doctor::DoctorIssueCode::StaleLock))
+    {
+        HealthState::Error
+    } else if doctor
+        .issues
+        .iter()
+        .any(|issue| matches!(issue.code, crate::core::doctor::DoctorIssueCode::ActiveLock))
+    {
+        HealthState::Warning
+    } else {
+        HealthState::Ok
+    };
+    let cache_health = if paths.cache_dir.exists() {
+        HealthState::Ok
+    } else {
+        HealthState::Warning
+    };
+    Ok((registry_health, lock_health, cache_health))
+}
+
 impl GuiController {
     pub fn new(paths: AppPaths) -> Self {
         Self {
@@ -322,7 +363,9 @@ impl GuiController {
             }
             GuiActionIntent::ScanAgentSpaces => {
                 let home = self.home_dir.clone().map_or_else(default_home_dir, Ok)?;
-                let instances = scan_agent_spaces(&self.paths, &home)?.len();
+                let instances = refresh_skill_instance_index(&self.paths, &home)?
+                    .instances
+                    .len();
                 GuiControllerOutcome::AgentSpacesScanned { instances }
             }
             GuiActionIntent::ImportAllManagedCopies => {
@@ -511,21 +554,14 @@ impl GuiController {
                 GuiControllerOutcome::None
             }
             GuiActionIntent::RefreshProject { project_path } => {
-                let report = project_onboarding_scan(ProjectOnboardingScanRequest {
-                    app_paths: &self.paths,
-                    project_path,
-                })?;
-                let pending_conflicts = unresolved_project_conflicts(&report.discovered);
+                let home = self.home_dir.clone().map_or_else(default_home_dir, Ok)?;
+                refresh_skill_instance_index(&self.paths, &home)?;
                 GuiControllerOutcome::ProjectScan {
-                    project_path: report.project_path,
-                    discovered_unmanaged_count: report.discovered.len(),
-                    discovered_skills: report
-                        .discovered
-                        .into_iter()
-                        .map(ProjectDiscoveredSkill::from)
-                        .collect(),
+                    project_path: project_path.clone(),
+                    discovered_unmanaged_count: 0,
+                    discovered_skills: Vec::new(),
                     adopt_result: None,
-                    pending_conflicts,
+                    pending_conflicts: Vec::new(),
                     preserve_existing_conflicts: true,
                 }
             }
@@ -665,19 +701,15 @@ impl GuiController {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DashboardSummary {
     pub agent_space_instance_count: usize,
-    pub managed_skill_count: usize,
+    pub project_agent_space_instance_count: usize,
     pub agent_count: usize,
     pub enabled_agent_count: usize,
     pub recent_project_count: usize,
-    pub deployment_count: usize,
-    pub outdated_deployment_count: usize,
-    pub drifted_deployment_count: usize,
     pub invalid_toggle_count: usize,
-    pub missing_managed_source_count: usize,
+    pub read_only_count: usize,
     pub registry_health: HealthState,
     pub lock_health: HealthState,
     pub cache_health: HealthState,
-    pub risk_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -685,6 +717,7 @@ pub struct ProjectSummary {
     pub name: String,
     pub path: Utf8PathBuf,
     pub deployment_count: usize,
+    pub native_skill_count: usize,
     pub onboarding_scanned: bool,
     pub discovered_unmanaged_count: usize,
     pub discovered_skills: Vec<ProjectDiscoveredSkill>,
@@ -849,20 +882,15 @@ impl GuiModel {
 
     pub fn load_with_home_dir(paths: &AppPaths, home_dir: Utf8PathBuf) -> Result<Self> {
         let config = read_config(paths)?;
-        let skill_instances = scan_agent_spaces(paths, &home_dir)?;
+        let cached_index = read_skill_instance_index(paths)?;
+        let skill_instances = if cached_index.instances.is_empty() {
+            scan_agent_spaces(paths, &home_dir)?
+        } else {
+            cached_index.instances
+        };
         let skills = read_skills_registry(paths)?.skills;
         let deployments = read_deployments_registry(paths)?.deployments;
-        let deployment_statuses = deployments
-            .iter()
-            .map(|deployment| {
-                project_deployment_status(
-                    paths,
-                    &deployment.project_path,
-                    &deployment.agent_id,
-                    &deployment.skill_name,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let deployment_statuses = Vec::new();
         let project_summaries = config
             .recent_projects
             .iter()
@@ -871,10 +899,20 @@ impl GuiModel {
                     .iter()
                     .filter(|deployment| deployment.project_path == project.path)
                     .count();
+                let native_skill_count = skill_instances
+                    .iter()
+                    .filter(|instance| {
+                        matches!(
+                            &instance.scope,
+                            SkillInstanceScope::Project { path, .. } if path == &project.path
+                        )
+                    })
+                    .count();
                 ProjectSummary {
                     name: project.name.clone(),
                     path: project.path.clone(),
                     deployment_count,
+                    native_skill_count,
                     onboarding_scanned: false,
                     discovered_unmanaged_count: 0,
                     discovered_skills: Vec::new(),
@@ -884,40 +922,41 @@ impl GuiModel {
                 }
             })
             .collect::<Vec<_>>();
-        let status = global_status(paths)?;
+        let (registry_health, lock_health, cache_health) = gui_health(paths)?;
+        let invalid_toggle_count = skill_instances
+            .iter()
+            .filter(|instance| {
+                matches!(
+                    instance.toggle_state,
+                    ToggleState::InvalidBothPresent | ToggleState::InvalidBothMissing
+                )
+            })
+            .count();
+        let read_only_count = skill_instances
+            .iter()
+            .filter(|instance| {
+                !instance.writable
+                    && matches!(
+                        instance.toggle_state,
+                        ToggleState::Enabled | ToggleState::Disabled
+                    )
+            })
+            .count();
+        let project_agent_space_instance_count = skill_instances
+            .iter()
+            .filter(|instance| matches!(instance.scope, SkillInstanceScope::Project { .. }))
+            .count();
         let dashboard = DashboardSummary {
             agent_space_instance_count: skill_instances.len(),
-            managed_skill_count: status.managed_skill_count,
-            agent_count: status.agent_count,
-            enabled_agent_count: status.enabled_agent_count,
-            recent_project_count: status.recent_project_count,
-            deployment_count: deployments.len(),
-            outdated_deployment_count: deployment_statuses
-                .iter()
-                .filter(|status| status.outdated)
-                .count(),
-            drifted_deployment_count: deployment_statuses
-                .iter()
-                .filter(|status| status.drift)
-                .count(),
-            invalid_toggle_count: deployment_statuses
-                .iter()
-                .filter(|status| {
-                    matches!(
-                        status.toggle,
-                        crate::core::registry::ToggleState::InvalidBothPresent
-                            | crate::core::registry::ToggleState::InvalidBothMissing
-                    )
-                })
-                .count(),
-            missing_managed_source_count: deployment_statuses
-                .iter()
-                .filter(|status| status.missing_managed_source)
-                .count(),
-            registry_health: status.registry_health,
-            lock_health: status.lock_health,
-            cache_health: status.cache_health,
-            risk_count: status.risk_count,
+            project_agent_space_instance_count,
+            agent_count: config.agents.len(),
+            enabled_agent_count: config.agents.iter().filter(|agent| agent.enabled).count(),
+            recent_project_count: config.recent_projects.len(),
+            invalid_toggle_count,
+            read_only_count,
+            registry_health,
+            lock_health,
+            cache_health,
         };
         let selected_project = config
             .recent_projects
@@ -1032,6 +1071,22 @@ impl GuiModel {
                 }
             }
             NavigationView::Projects => {
+                if let Some(project_path) = self.skill_instances.iter().find_map(|instance| {
+                    if instance.id != row_id {
+                        return None;
+                    }
+                    match &instance.scope {
+                        SkillInstanceScope::Project { path, .. } => Some(path.clone()),
+                        SkillInstanceScope::Global => None,
+                    }
+                }) {
+                    self.selected_project = Some(project_path);
+                    self.select_skill_instance(row_id.to_string());
+                    self.selected_deployment = None;
+                    self.selected_discovered_project_skill = None;
+                    self.pending_remove_confirmation = None;
+                    return true;
+                }
                 if let Some(discovered) = parse_discovered_project_row_id(row_id) {
                     if self.selected_project_summary().is_some_and(|summary| {
                         summary.discovered_skills.iter().any(|skill| {
@@ -1237,11 +1292,8 @@ impl GuiModel {
         let instance = self.selected_skill_instance()?.clone();
         if !matches!(
             instance.source_kind,
-            SkillInstanceSourceKind::AgentSpace | SkillInstanceSourceKind::ProjectDeployment
+            SkillInstanceSourceKind::AgentSpace | SkillInstanceSourceKind::ProjectAgentSpace
         ) {
-            return None;
-        }
-        if instance.stable_id.is_some() {
             return None;
         }
         if matches!(
@@ -2023,7 +2075,7 @@ impl GuiModel {
         }
     }
 
-    fn agent_label(&self, agent_id: &AgentId) -> String {
+    pub fn agent_label(&self, agent_id: &AgentId) -> String {
         self.agents
             .iter()
             .find(|agent| agent.id == *agent_id)
@@ -2097,6 +2149,7 @@ impl GuiModel {
                         &skipped_conflicts,
                     );
                     summary.deployment_count = deployment_count;
+                    summary.native_skill_count = discovered_skills.len();
                     summary.onboarding_scanned = true;
                     summary.discovered_unmanaged_count = discovered_skills.len();
                     summary.discovered_skills = discovered_skills;
@@ -2111,6 +2164,7 @@ impl GuiModel {
                             .unwrap_or_else(|| project_path.to_string()),
                         path: project_path,
                         deployment_count,
+                        native_skill_count: discovered_skills.len(),
                         onboarding_scanned: true,
                         discovered_unmanaged_count: discovered_skills.len(),
                         discovered_skills,
@@ -2138,6 +2192,7 @@ impl GuiModel {
                             .unwrap_or_else(|| project_path.to_string()),
                         path: project_path.clone(),
                         deployment_count,
+                        native_skill_count: 0,
                         onboarding_scanned: false,
                         discovered_unmanaged_count: 0,
                         discovered_skills: Vec::new(),
@@ -2255,19 +2310,15 @@ impl Default for GuiModel {
             active_scope: GuiScope::GlobalInventory,
             dashboard: DashboardSummary {
                 agent_space_instance_count: 0,
-                managed_skill_count: 0,
+                project_agent_space_instance_count: 0,
                 agent_count: 0,
                 enabled_agent_count: 0,
                 recent_project_count: 0,
-                deployment_count: 0,
-                outdated_deployment_count: 0,
-                drifted_deployment_count: 0,
                 invalid_toggle_count: 0,
-                missing_managed_source_count: 0,
+                read_only_count: 0,
                 registry_health: HealthState::Ok,
                 lock_health: HealthState::Ok,
                 cache_health: HealthState::Ok,
-                risk_count: 0,
             },
             skills: Vec::new(),
             skill_instances: Vec::new(),
@@ -2458,9 +2509,8 @@ pub fn skill_instance_source_label(model: &GuiModel, instance: &SkillInstance) -
         SkillInstanceSourceKind::AgentSpace => {
             format!("{} global", model.agent_label(&instance.agent_id))
         }
-        SkillInstanceSourceKind::ProjectDeployment => "Project".to_string(),
+        SkillInstanceSourceKind::ProjectAgentSpace => "Project".to_string(),
         SkillInstanceSourceKind::PluginCache => "Plugin cache".to_string(),
         SkillInstanceSourceKind::Vendor => "Vendor".to_string(),
-        SkillInstanceSourceKind::ManagedInventory => "Managed inventory".to_string(),
     }
 }

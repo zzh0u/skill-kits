@@ -147,16 +147,21 @@ fn release_smoke_fixture_loads_expected_gui_model_acceptance_state() {
         dashboard.main_rows[0].cells,
         vec!["Agent Space Skills", "2"]
     );
-    assert_eq!(dashboard.main_rows[1].cells, vec!["Managed Skills", "1"]);
+    assert_eq!(
+        dashboard.main_rows[1].cells,
+        vec!["Project Agent Space Skills", "2"]
+    );
     assert_eq!(dashboard.main_rows[2].cells, vec!["Agents", "3/3 enabled"]);
     assert_eq!(dashboard.main_rows[3].cells, vec!["Recent Projects", "1"]);
-    assert!(dashboard
+    let health = dashboard
         .inspector_sections
         .iter()
-        .any(|section| section.title == "Health"
-            && section
-                .lines
-                .contains(&"Missing managed sources 1".to_string())));
+        .find(|section| section.title == "Health")
+        .expect("dashboard health");
+    assert!(!health
+        .lines
+        .iter()
+        .any(|line| line.contains("managed sources") || line.contains("deployments")));
 
     model.navigate(NavigationView::Agents);
     let agents = model.renderable_view();
@@ -173,14 +178,13 @@ fn release_smoke_fixture_loads_expected_gui_model_acceptance_state() {
     assert!(projects
         .main_rows
         .iter()
-        .any(|row| row.cells[0] == "source-skill"
+        .any(|row| row.cells[0] == "Release Smoke Source"
             && row.cells[2] == "Disabled"
-            && row.cells[4] == "Drift"
-            && row.cells[5] == "Missing managed source"));
+            && row.cells[3] == "Project"));
     assert!(projects
         .main_rows
         .iter()
-        .any(|row| row.cells[0] == "project-seed" && row.cells[2] == "Enabled"));
+        .any(|row| row.cells[0] == "Release Smoke Project Seed" && row.cells[2] == "Enabled"));
 }
 
 fn copy_dir(source: &camino::Utf8Path, target: &camino::Utf8Path) {

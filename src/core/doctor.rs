@@ -48,6 +48,9 @@ pub enum DoctorIssueCode {
     InvalidToggle,
     MissingDeployment,
     MissingManagedSource,
+    LegacyManagedInventory,
+    LegacyDeploymentRecords,
+    StaleSkillInstanceIndex,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -77,6 +80,7 @@ pub fn run_doctor(paths: &AppPaths, fix: bool) -> Result<DoctorReport> {
     check_config(paths, fix, &mut issues, &mut fixed_count)?;
     let skills = check_skills(paths, &mut issues);
     check_deployments(paths, skills.as_ref().ok(), &mut issues);
+    check_skill_instance_index(paths, &mut issues);
 
     Ok(report(issues, fixed_count))
 }
@@ -169,6 +173,15 @@ fn check_skills(
         }
     };
 
+    if !skills.skills.is_empty() {
+        issues.push(issue(
+            DoctorIssueCode::LegacyManagedInventory,
+            DoctorSeverity::Warning,
+            Some(paths.skills_registry_file.clone()),
+            "skills.toml contains legacy Managed Inventory data; native Agent Spaces are the Skill source of truth".to_string(),
+        ));
+    }
+
     for skill in &skills.skills {
         if !skill.managed_path.exists() {
             issues.push(issue(
@@ -211,6 +224,15 @@ fn check_deployments(
             return;
         }
     };
+
+    if !deployments.deployments.is_empty() {
+        issues.push(issue(
+            DoctorIssueCode::LegacyDeploymentRecords,
+            DoctorSeverity::Warning,
+            Some(paths.deployments_registry_file.clone()),
+            "deployments.toml contains legacy Project Deployment records; native project Agent Spaces are authoritative".to_string(),
+        ));
+    }
 
     for deployment in &deployments.deployments {
         if !deployment.project_path.exists() {
@@ -272,6 +294,47 @@ fn check_deployments(
                 ),
             )),
         }
+    }
+}
+
+fn check_skill_instance_index(paths: &AppPaths, issues: &mut Vec<DoctorIssue>) {
+    if !paths.skill_instance_index_file.exists() {
+        return;
+    }
+    let contents = match fs::read_to_string(&paths.skill_instance_index_file) {
+        Ok(contents) => contents,
+        Err(error) => {
+            issues.push(issue(
+                DoctorIssueCode::InvalidToml,
+                DoctorSeverity::Error,
+                Some(paths.skill_instance_index_file.clone()),
+                format!("Skill Instance Index could not be read: {error}"),
+            ));
+            return;
+        }
+    };
+    let index: crate::core::agent_space::SkillInstanceIndex = match toml::from_str(&contents) {
+        Ok(index) => index,
+        Err(error) => {
+            issues.push(issue(
+                DoctorIssueCode::InvalidToml,
+                DoctorSeverity::Error,
+                Some(paths.skill_instance_index_file.clone()),
+                format!("Skill Instance Index TOML is invalid: {error}"),
+            ));
+            return;
+        }
+    };
+    for instance in index.instances {
+        if instance.enabled_path.exists() || instance.disabled_path.exists() {
+            continue;
+        }
+        issues.push(issue(
+            DoctorIssueCode::StaleSkillInstanceIndex,
+            DoctorSeverity::Warning,
+            Some(instance.skill_dir),
+            "Skill Instance Index references a path without SKILL.md or SKILL.md.disabled; run scan to refresh".to_string(),
+        ));
     }
 }
 

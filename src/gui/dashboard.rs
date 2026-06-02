@@ -12,7 +12,11 @@ pub fn renderable(model: &GuiModel) -> RenderableView {
             "Agent Space Skills",
             summary.agent_space_instance_count,
         ),
-        row("managed", "Managed Skills", summary.managed_skill_count),
+        row(
+            "project-agent-space",
+            "Project Agent Space Skills",
+            summary.project_agent_space_instance_count,
+        ),
         RenderRow {
             id: "agents".to_string(),
             cells: vec![
@@ -24,11 +28,6 @@ pub fn renderable(model: &GuiModel) -> RenderableView {
             ],
         },
         row("projects", "Recent Projects", summary.recent_project_count),
-        row(
-            "deployments",
-            "Project Deployments",
-            summary.deployment_count,
-        ),
     ];
     let project_lines = if model.project_summaries.is_empty() {
         vec!["No Recent Projects".to_string()]
@@ -38,8 +37,8 @@ pub fn renderable(model: &GuiModel) -> RenderableView {
             .iter()
             .map(|project| {
                 format!(
-                    "{} - {} deployment(s)",
-                    project.name, project.deployment_count
+                    "{} - {} Agent Space Skill(s)",
+                    project.name, project.native_skill_count
                 )
             })
             .collect()
@@ -58,7 +57,10 @@ pub fn renderable(model: &GuiModel) -> RenderableView {
                         "Agent Space instances {}",
                         summary.agent_space_instance_count
                     ),
-                    format!("Managed Inventory copies {}", summary.managed_skill_count),
+                    format!(
+                        "Project Agent Space instances {}",
+                        summary.project_agent_space_instance_count
+                    ),
                 ],
             },
             InspectorSection {
@@ -71,13 +73,13 @@ pub fn renderable(model: &GuiModel) -> RenderableView {
                     format!("Registry {}", health_label(&summary.registry_health)),
                     format!("Lock {}", health_label(&summary.lock_health)),
                     format!("Cache {}", health_label(&summary.cache_health)),
-                    format!("Risk findings {}", summary.risk_count),
-                    format!("Outdated deployments {}", summary.outdated_deployment_count),
-                    format!("Drifted deployments {}", summary.drifted_deployment_count),
-                    format!("Invalid toggles {}", summary.invalid_toggle_count),
                     format!(
-                        "Missing managed sources {}",
-                        summary.missing_managed_source_count
+                        "Invalid Agent Space toggles {}",
+                        summary.invalid_toggle_count
+                    ),
+                    format!(
+                        "Read-only Agent Space instances {}",
+                        summary.read_only_count
                     ),
                 ],
             },

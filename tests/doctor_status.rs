@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use camino::{Utf8Path, Utf8PathBuf};
 use skill_kits::core::{
+    agent_space::{SkillInstance, SkillInstanceIndex, SkillInstanceScope, SkillInstanceSourceKind},
     config::{Config, RecentProject},
     doctor::{run_doctor, DoctorIssueCode, DoctorSeverity},
     ids::{AgentId, SkillId},
@@ -222,7 +223,7 @@ fn global_status_includes_expected_counts_and_health() {
     assert_eq!(status.agent_count, 3);
     assert_eq!(status.enabled_agent_count, 3);
     assert_eq!(status.recent_project_count, 1);
-    assert_eq!(status.registry_health, HealthState::Ok);
+    assert_eq!(status.registry_health, HealthState::Warning);
     assert_eq!(status.lock_health, HealthState::Ok);
     assert_eq!(status.cache_health, HealthState::Ok);
     assert_eq!(status.risk_count, 0);
@@ -241,4 +242,89 @@ fn cli_doctor_exits_5_when_issues_remain() {
         .arg("doctor")
         .assert()
         .code(5);
+}
+
+#[test]
+fn doctor_reports_legacy_registries_without_rewriting_them() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    let project = Utf8PathBuf::from_path_buf(temp_dir.path().join("project")).unwrap();
+    let managed = managed_skill(&paths, "one-a1b2c3d4", "one");
+    write_skill(&managed.managed_path, "# One\n");
+    write_skill(&project.join(".agents/skills/one"), "# One\n");
+    write_toml(
+        &paths.skills_registry_file,
+        &SkillsRegistry {
+            version: 1,
+            skills: vec![managed],
+        },
+    );
+    write_toml(
+        &paths.deployments_registry_file,
+        &DeploymentsRegistry {
+            version: 1,
+            deployments: vec![deployment_record(&project, "one-a1b2c3d4", "one")],
+        },
+    );
+    let skills_before = std::fs::read_to_string(&paths.skills_registry_file).unwrap();
+    let deployments_before = std::fs::read_to_string(&paths.deployments_registry_file).unwrap();
+
+    let report = run_doctor(&paths, true).unwrap();
+
+    assert!(report.issues.iter().any(|issue| issue.code
+        == DoctorIssueCode::LegacyManagedInventory
+        && issue.severity == DoctorSeverity::Warning));
+    assert!(report.issues.iter().any(|issue| issue.code
+        == DoctorIssueCode::LegacyDeploymentRecords
+        && issue.severity == DoctorSeverity::Warning));
+    assert_eq!(
+        std::fs::read_to_string(&paths.skills_registry_file).unwrap(),
+        skills_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(&paths.deployments_registry_file).unwrap(),
+        deployments_before
+    );
+}
+
+#[test]
+fn doctor_reports_stale_skill_instance_index() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_toml(&paths.skills_registry_file, &SkillsRegistry::default());
+    write_toml(
+        &paths.deployments_registry_file,
+        &DeploymentsRegistry::default(),
+    );
+    let stale_dir = Utf8PathBuf::from_path_buf(temp_dir.path().join("missing-skill")).unwrap();
+    write_toml(
+        &paths.skill_instance_index_file,
+        &SkillInstanceIndex {
+            version: 1,
+            last_scanned_at: "2026-06-02T00:00:00Z".to_string(),
+            instances: vec![SkillInstance {
+                id: "stale".to_string(),
+                name: "stale".to_string(),
+                agent_id: AgentId::new("codex"),
+                scope: SkillInstanceScope::Global,
+                skill_dir: stale_dir.clone(),
+                enabled_path: stale_dir.join("SKILL.md"),
+                disabled_path: stale_dir.join("SKILL.md.disabled"),
+                toggle_state: skill_kits::core::registry::ToggleState::Enabled,
+                source_kind: SkillInstanceSourceKind::AgentSpace,
+                writable: true,
+                metadata: None,
+                content_hash: None,
+                updated_at: None,
+            }],
+        },
+    );
+
+    let report = run_doctor(&paths, false).unwrap();
+
+    assert!(report.issues.iter().any(|issue| issue.code
+        == DoctorIssueCode::StaleSkillInstanceIndex
+        && issue.path.as_ref() == Some(&stale_dir)));
 }

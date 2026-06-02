@@ -31,6 +31,12 @@ pub enum Command {
     Uninstall {
         skill: String,
     },
+    Enable {
+        query: String,
+    },
+    Disable {
+        query: String,
+    },
     Scan {
         skill: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Table)]

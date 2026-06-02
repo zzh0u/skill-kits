@@ -1,7 +1,8 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use skill_kits::core::{
     agent_space::{
-        scan_agent_spaces, SkillInstanceScope, SkillInstanceSourceKind, AGENT_SPACE_PLUGIN_DEPTH,
+        read_skill_instance_index, refresh_skill_instance_index, scan_agent_spaces,
+        SkillInstanceScope, SkillInstanceSourceKind, AGENT_SPACE_PLUGIN_DEPTH,
     },
     agents::{AgentConfig, AgentKind},
     config::{write_config, Config, RecentProject},
@@ -219,27 +220,14 @@ fn legacy_deployment_without_toggle_file_becomes_missing_instance() {
     )
     .unwrap();
 
-    let instance = scan_agent_spaces(&paths, &home)
-        .unwrap()
-        .into_iter()
-        .find(|instance| instance.skill_dir == missing_dir)
-        .expect("missing legacy instance");
+    let instances = scan_agent_spaces(&paths, &home).unwrap();
 
-    assert_eq!(instance.name, "missing-skill");
-    assert_eq!(instance.toggle_state, ToggleState::InvalidBothMissing);
-    assert_eq!(
-        instance.source_kind,
-        SkillInstanceSourceKind::ProjectDeployment
+    assert!(
+        instances
+            .iter()
+            .all(|instance| instance.skill_dir != missing_dir),
+        "native Agent Space scan must not invent stale rows from deployments.toml"
     );
-    assert_eq!(
-        instance.scope,
-        SkillInstanceScope::Project {
-            name: "sample-app".to_string(),
-            path: project
-        }
-    );
-    assert!(!instance.writable);
-    assert!(instance.content_hash.is_none());
 }
 
 #[test]
@@ -284,6 +272,61 @@ fn plugin_cache_and_vendor_are_bounded_recursive_read_only_instances() {
             .all(|instance| instance.skill_dir != too_deep),
         "recursive plugin scan must stop at depth {AGENT_SPACE_PLUGIN_DEPTH}"
     );
+}
+
+#[test]
+fn built_in_codex_scan_includes_default_plugin_and_vendor_roots() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let home = home_path(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_config(
+        &paths,
+        &Config {
+            agents: vec![AgentConfig {
+                id: AgentId::new("codex"),
+                label: "Codex".to_string(),
+                kind: AgentKind::BuiltIn,
+                global_skill_dirs: vec!["~/.codex/skills".into()],
+                project_skill_dirs: vec![".agents/skills".into()],
+                enabled: true,
+            }],
+            recent_projects: Vec::new(),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let native_skill = home.join(".codex/skills/native-skill");
+    write_skill_file(&native_skill, "SKILL.md", "# Native Skill\n");
+    let plugin_skill =
+        home.join(".codex/plugins/cache/openai-curated/vercel/8770e9d2/skills/plugin-skill");
+    write_skill_file(&plugin_skill, "SKILL.md", "# Plugin Skill\n");
+    let vendor_skill = home.join(".codex/vendor_imports/skills/skills/.curated/vendor-skill");
+    write_skill_file(&vendor_skill, "SKILL.md", "# Vendor Skill\n");
+
+    let instances = scan_agent_spaces(&paths, &home).unwrap();
+
+    let native = instances
+        .iter()
+        .find(|instance| instance.skill_dir == native_skill)
+        .expect("native instance");
+    assert_eq!(native.source_kind, SkillInstanceSourceKind::AgentSpace);
+    assert!(native.writable);
+
+    let plugin = instances
+        .iter()
+        .find(|instance| instance.skill_dir == plugin_skill)
+        .expect("plugin instance from default root");
+    assert_eq!(plugin.source_kind, SkillInstanceSourceKind::PluginCache);
+    assert!(!plugin.writable);
+
+    let vendor = instances
+        .iter()
+        .find(|instance| instance.skill_dir == vendor_skill)
+        .expect("vendor instance from default root");
+    assert_eq!(vendor.source_kind, SkillInstanceSourceKind::Vendor);
+    assert!(!vendor.writable);
 }
 
 #[test]
@@ -386,7 +429,7 @@ fn recent_projects_are_scanned_as_project_deployments() {
         .expect("project instance");
     assert_eq!(
         instance.source_kind,
-        SkillInstanceSourceKind::ProjectDeployment
+        SkillInstanceSourceKind::ProjectAgentSpace
     );
     assert_eq!(
         instance.scope,
@@ -475,4 +518,66 @@ fn agent_space_scan_does_not_write_registry_files() {
         std::fs::read_to_string(&paths.deployments_registry_file).unwrap(),
         deployments_before
     );
+}
+
+#[test]
+fn refresh_skill_instance_index_writes_toml_without_touching_legacy_registries() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let home = home_path(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_test_config(&paths, &home, Vec::new());
+    write_skills_registry(&paths, &SkillsRegistry::default()).unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    let skills_before = std::fs::read_to_string(&paths.skills_registry_file).unwrap();
+    let deployments_before = std::fs::read_to_string(&paths.deployments_registry_file).unwrap();
+
+    let skill_dir = home.join(".codex/skills/indexed-skill");
+    write_skill_file(&skill_dir, "SKILL.md", "# Indexed\n");
+
+    let index = refresh_skill_instance_index(&paths, &home).unwrap();
+
+    assert!(paths.skill_instance_index_file.exists());
+    assert_eq!(index.instances.len(), 1);
+    assert_eq!(index.instances[0].skill_dir, skill_dir);
+    assert_eq!(
+        read_skill_instance_index(&paths).unwrap().instances[0].skill_dir,
+        skill_dir
+    );
+    assert_eq!(
+        std::fs::read_to_string(&paths.skills_registry_file).unwrap(),
+        skills_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(&paths.deployments_registry_file).unwrap(),
+        deployments_before
+    );
+}
+
+#[test]
+fn read_skill_instance_index_rescans_when_index_path_is_stale() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let home = home_path(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_test_config(&paths, &home, Vec::new());
+    let stale_skill = home.join(".codex/skills/stale-skill");
+    let fresh_skill = home.join(".codex/skills/fresh-skill");
+    write_skill_file(&stale_skill, "SKILL.md", "# Stale\n");
+    refresh_skill_instance_index(&paths, &home).unwrap();
+    std::fs::remove_dir_all(&stale_skill).unwrap();
+    write_skill_file(&fresh_skill, "SKILL.md.disabled", "# Fresh\n");
+
+    let index = read_skill_instance_index(&paths).unwrap();
+
+    assert!(index
+        .instances
+        .iter()
+        .all(|instance| instance.skill_dir != stale_skill));
+    let fresh = index
+        .instances
+        .iter()
+        .find(|instance| instance.skill_dir == fresh_skill)
+        .expect("fresh instance after stale-index rescan");
+    assert_eq!(fresh.toggle_state, ToggleState::Disabled);
 }

@@ -4,6 +4,13 @@ use crate::cli::args::{
 };
 use crate::cli::output::{format_table, to_json, TableColumn};
 use crate::core::adopt::AdoptReport;
+use crate::core::agent_space::{
+    disable_project_skill_instance, disable_skill_instance_by_query, enable_project_skill_instance,
+    enable_skill_instance_by_query, project_skill_instances, read_skill_instance_index,
+    refresh_skill_instance_index, ProjectSkillInstanceRequest, SkillInstance, SkillInstanceIndex,
+    SkillInstanceQueryRequest, SkillInstanceScope, SkillInstanceSourceKind,
+};
+use crate::core::config::read_config;
 use crate::core::doctor::{DoctorIssue, DoctorReport};
 use crate::core::error::SkillKitsError;
 use crate::core::ids::AgentId;
@@ -11,11 +18,10 @@ use crate::core::paths::AppPaths;
 use crate::core::project::{
     resolve_project_scope, ProjectDeployRequest,
     ProjectRedeployRequest as CoreProjectRedeployRequest,
-    ProjectRemoveRequest as CoreProjectRemoveRequest, ProjectSkillRequest, RedeployOutcome,
+    ProjectRemoveRequest as CoreProjectRemoveRequest, RedeployOutcome,
 };
 use crate::core::scan::RiskFinding;
-use crate::core::status::GlobalStatus;
-use crate::core::{DeploymentStatus, ManagedSkill};
+use crate::core::ManagedSkill;
 use camino::Utf8PathBuf;
 use clap::Parser;
 use serde::Serialize;
@@ -93,14 +99,21 @@ fn execute(cli: Cli) -> CliResult<Option<String>> {
     match cli.command.unwrap_or(Command::Status {
         format: OutputFormat::Table,
     }) {
-        Command::List { format } => render_list(list_skills(&app_paths)?, format),
-        Command::Status { format } => render_global_status(global_status(&app_paths)?, format),
+        Command::List { format } => render_list(list_skill_instances(&app_paths)?, format),
+        Command::Status { format } => {
+            render_agent_space_status(agent_space_status(&app_paths)?, format)
+        }
         Command::Install { command } => {
             let InstallCommand::Local { path } = command;
             render_operation(install_local(&app_paths, path)?)
         }
         Command::Uninstall { skill } => render_operation(uninstall_skill(&app_paths, skill)?),
-        Command::Scan { skill, format } => render_scan(scan_skill(&app_paths, skill)?, format),
+        Command::Enable { query } => render_operation(enable_instance(&app_paths, query)?),
+        Command::Disable { query } => render_operation(disable_instance(&app_paths, query)?),
+        Command::Scan { skill, format } => match skill {
+            Some(skill) => render_scan(scan_skill(&app_paths, skill)?, format),
+            None => render_scan_index(scan_agent_spaces(&app_paths)?, format),
+        },
         Command::Doctor { fix } => render_doctor(doctor(&app_paths, fix)?),
         Command::Adopt { global_agent } => {
             render_adopt(adopt_global_agent(&app_paths, global_agent)?)
@@ -124,96 +137,103 @@ fn execute_project(app_paths: &AppPaths, command: ProjectCommand) -> CliResult<O
     }
 }
 
-fn render_list(skills: Vec<ManagedSkill>, format: OutputFormat) -> CliResult<Option<String>> {
+fn render_list(instances: Vec<SkillInstance>, format: OutputFormat) -> CliResult<Option<String>> {
     match format {
-        OutputFormat::Json => Ok(Some(to_json(&skills).map_err(general_io_error)?)),
+        OutputFormat::Json => Ok(Some(to_json(&instances).map_err(general_io_error)?)),
         OutputFormat::Table => {
-            let rows = skills
+            let rows = instances
                 .into_iter()
-                .map(|skill| {
+                .map(|instance| {
+                    let status = toggle_label(&instance);
+                    let source = source_label(&instance.source_kind);
                     vec![
-                        TableColumn::from(skill.id.to_string()),
-                        TableColumn::from(skill.name),
-                        TableColumn::from(skill.content_hash),
+                        TableColumn::from(instance.id),
+                        TableColumn::from(instance.name),
+                        TableColumn::from(instance.agent_id.to_string()),
+                        TableColumn::from(scope_label(&instance.scope)),
+                        TableColumn::from(status),
+                        TableColumn::from(source),
+                        TableColumn::from(instance.skill_dir.to_string()),
+                        TableColumn::from(instance.updated_at.unwrap_or_else(|| "-".to_string())),
                     ]
                 })
                 .collect::<Vec<_>>();
             Ok(Some(format_table(
-                &["Skill ID", "Name", "Content Hash"],
+                &[
+                    "Instance ID",
+                    "Skill",
+                    "Agent",
+                    "Scope",
+                    "Status",
+                    "Source",
+                    "Skill Dir",
+                    "Updated",
+                ],
                 &rows,
             )))
         }
     }
 }
 
-fn render_global_status(status: GlobalStatus, format: OutputFormat) -> CliResult<Option<String>> {
-    #[derive(Serialize)]
-    struct GlobalStatusOutput {
-        managed_skills: usize,
-        agents: usize,
-        enabled_agents: usize,
-        agent_config_state: String,
-        recent_projects: usize,
-        registry_health: String,
-        lock_health: String,
-        cache_health: String,
-        risk_count: usize,
-    }
-
-    let output = GlobalStatusOutput {
-        managed_skills: status.managed_skill_count,
-        agents: status.agent_count,
-        enabled_agents: status.enabled_agent_count,
-        agent_config_state: format!("{:?}", status.agent_config_state),
-        recent_projects: status.recent_project_count,
-        registry_health: format!("{:?}", status.registry_health),
-        lock_health: format!("{:?}", status.lock_health),
-        cache_health: format!("{:?}", status.cache_health),
-        risk_count: status.risk_count,
-    };
-
+fn render_agent_space_status(
+    status: AgentSpaceStatus,
+    format: OutputFormat,
+) -> CliResult<Option<String>> {
     match format {
-        OutputFormat::Json => Ok(Some(to_json(&output).map_err(general_io_error)?)),
+        OutputFormat::Json => Ok(Some(to_json(&status).map_err(general_io_error)?)),
         OutputFormat::Table => Ok(Some(format_table(
             &["Metric", "Value"],
             &[
                 vec![
-                    TableColumn::from("Managed Skills"),
-                    TableColumn::from(output.managed_skills),
-                ],
-                vec![
                     TableColumn::from("Agents"),
-                    TableColumn::from(output.agents),
+                    TableColumn::from(status.agents),
                 ],
                 vec![
                     TableColumn::from("Enabled Agents"),
-                    TableColumn::from(output.enabled_agents),
+                    TableColumn::from(status.enabled_agents),
                 ],
                 vec![
-                    TableColumn::from("Agent Config"),
-                    TableColumn::from(output.agent_config_state),
+                    TableColumn::from("Global Instances"),
+                    TableColumn::from(status.global_instances),
+                ],
+                vec![
+                    TableColumn::from("Project Instances"),
+                    TableColumn::from(status.project_instances),
+                ],
+                vec![
+                    TableColumn::from("Invalid Instances"),
+                    TableColumn::from(status.invalid_instances),
+                ],
+                vec![
+                    TableColumn::from("Read-only Instances"),
+                    TableColumn::from(status.read_only_instances),
                 ],
                 vec![
                     TableColumn::from("Recent Projects"),
-                    TableColumn::from(output.recent_projects),
+                    TableColumn::from(status.recent_projects),
                 ],
                 vec![
-                    TableColumn::from("Registry Health"),
-                    TableColumn::from(output.registry_health),
+                    TableColumn::from("Last Scan"),
+                    TableColumn::from(status.last_scanned_at),
                 ],
                 vec![
-                    TableColumn::from("Lock Health"),
-                    TableColumn::from(output.lock_health),
-                ],
-                vec![
-                    TableColumn::from("Cache Health"),
-                    TableColumn::from(output.cache_health),
-                ],
-                vec![
-                    TableColumn::from("Risk Count"),
-                    TableColumn::from(output.risk_count),
+                    TableColumn::from("Stale Entries"),
+                    TableColumn::from(status.stale_entries),
                 ],
             ],
+        ))),
+    }
+}
+
+fn render_scan_index(index: SkillInstanceIndex, format: OutputFormat) -> CliResult<Option<String>> {
+    match format {
+        OutputFormat::Json => Ok(Some(to_json(&index).map_err(general_io_error)?)),
+        OutputFormat::Table => Ok(Some(format_table(
+            &["Operation", "Status"],
+            &[vec![
+                TableColumn::from("Scan Agent Spaces"),
+                TableColumn::from(format!("indexed {} instances", index.instances.len())),
+            ]],
         ))),
     }
 }
@@ -312,23 +332,24 @@ fn render_adopt(report: AdoptReport) -> CliResult<Option<String>> {
 }
 
 fn render_project_status(
-    deployments: Vec<DeploymentStatus>,
+    instances: Vec<SkillInstance>,
     format: OutputFormat,
 ) -> CliResult<Option<String>> {
     match format {
-        OutputFormat::Json => Ok(Some(to_json(&deployments).map_err(general_io_error)?)),
+        OutputFormat::Json => Ok(Some(to_json(&instances).map_err(general_io_error)?)),
         OutputFormat::Table => {
-            let rows = deployments
+            let rows = instances
                 .into_iter()
-                .map(|deployment| {
+                .map(|instance| {
+                    let status = toggle_label(&instance);
+                    let source = source_label(&instance.source_kind);
                     vec![
-                        TableColumn::from(deployment.record.skill_name),
-                        TableColumn::from(deployment.record.agent_id.to_string()),
-                        TableColumn::from(deployment.record.deployment_path.to_string()),
-                        TableColumn::from(format!("{:?}", deployment.toggle)),
-                        TableColumn::from(deployment.outdated),
-                        TableColumn::from(deployment.drift),
-                        TableColumn::from(deployment.missing_managed_source),
+                        TableColumn::from(instance.name),
+                        TableColumn::from(instance.agent_id.to_string()),
+                        TableColumn::from(instance.skill_dir.to_string()),
+                        TableColumn::from(status),
+                        TableColumn::from(source),
+                        TableColumn::from(instance.writable),
                     ]
                 })
                 .collect::<Vec<_>>();
@@ -336,11 +357,10 @@ fn render_project_status(
                 &[
                     "Skill",
                     "Agent",
-                    "Project Skill Dir",
-                    "Toggle",
-                    "Outdated",
-                    "Drift",
-                    "Missing Managed Source",
+                    "Skill Dir",
+                    "Status",
+                    "Source",
+                    "Writable",
                 ],
                 &rows,
             )))
@@ -371,12 +391,72 @@ struct OperationMessage {
     status: String,
 }
 
-fn list_skills(app_paths: &AppPaths) -> crate::core::Result<Vec<ManagedSkill>> {
-    Ok(crate::core::registry::read_skills_registry(app_paths)?.skills)
+#[derive(Clone, Debug, Serialize)]
+struct AgentSpaceStatus {
+    agents: usize,
+    enabled_agents: usize,
+    global_instances: usize,
+    project_instances: usize,
+    invalid_instances: usize,
+    read_only_instances: usize,
+    recent_projects: usize,
+    last_scanned_at: String,
+    stale_entries: usize,
 }
 
-fn global_status(app_paths: &AppPaths) -> crate::core::Result<GlobalStatus> {
-    crate::core::status::global_status(app_paths)
+fn list_skill_instances(app_paths: &AppPaths) -> crate::core::Result<Vec<SkillInstance>> {
+    Ok(read_skill_instance_index(app_paths)?.instances)
+}
+
+fn agent_space_status(app_paths: &AppPaths) -> crate::core::Result<AgentSpaceStatus> {
+    let config = read_config(app_paths)?;
+    let index = read_skill_instance_index(app_paths)?;
+    Ok(AgentSpaceStatus {
+        agents: config.agents.len(),
+        enabled_agents: config.agents.iter().filter(|agent| agent.enabled).count(),
+        global_instances: index
+            .instances
+            .iter()
+            .filter(|instance| matches!(instance.scope, SkillInstanceScope::Global))
+            .count(),
+        project_instances: index
+            .instances
+            .iter()
+            .filter(|instance| matches!(instance.scope, SkillInstanceScope::Project { .. }))
+            .count(),
+        invalid_instances: index
+            .instances
+            .iter()
+            .filter(|instance| {
+                matches!(
+                    instance.toggle_state,
+                    crate::core::registry::ToggleState::InvalidBothPresent
+                        | crate::core::registry::ToggleState::InvalidBothMissing
+                )
+            })
+            .count(),
+        read_only_instances: index
+            .instances
+            .iter()
+            .filter(|instance| {
+                matches!(
+                    instance.source_kind,
+                    SkillInstanceSourceKind::PluginCache | SkillInstanceSourceKind::Vendor
+                ) || !instance.writable
+            })
+            .count(),
+        recent_projects: config.recent_projects.len(),
+        last_scanned_at: if index.last_scanned_at.is_empty() {
+            "-".to_string()
+        } else {
+            index.last_scanned_at
+        },
+        stale_entries: index
+            .instances
+            .iter()
+            .filter(|instance| !instance.enabled_path.exists() && !instance.disabled_path.exists())
+            .count(),
+    })
 }
 
 fn install_local(app_paths: &AppPaths, path: Utf8PathBuf) -> crate::core::Result<OperationMessage> {
@@ -387,8 +467,11 @@ fn install_local(app_paths: &AppPaths, path: Utf8PathBuf) -> crate::core::Result
         app_paths,
     )?;
     Ok(OperationMessage {
-        operation: "install local".to_string(),
-        status: format!("installed {}", result.skill.id),
+        operation: "legacy install local".to_string(),
+        status: format!(
+            "legacy managed-copy command; installed {} in Managed Inventory",
+            result.skill.id
+        ),
     })
 }
 
@@ -398,26 +481,41 @@ fn uninstall_skill(app_paths: &AppPaths, query: String) -> crate::core::Result<O
             app_paths,
             query: &query,
         })?;
-    Ok(operation_status("uninstall", result.skill_id.as_str()))
+    Ok(operation_status(
+        "legacy uninstall",
+        &format!(
+            "legacy managed-copy command; removed {} from Managed Inventory",
+            result.skill_id
+        ),
+    ))
 }
 
-fn scan_skill(
-    app_paths: &AppPaths,
-    skill: Option<String>,
-) -> crate::core::Result<Vec<RiskFinding>> {
-    if let Some(query) = skill {
-        let skill = list_skills(app_paths)?
-            .into_iter()
-            .find(|skill| skill.id.as_str() == query || skill.name == query)
-            .ok_or(SkillKitsError::SkillNotFound { query })?;
-        crate::core::scan::scan_skill_dir(&skill.managed_path)
-    } else {
-        let mut findings = Vec::new();
-        for skill in list_skills(app_paths)? {
-            findings.extend(crate::core::scan::scan_skill_dir(&skill.managed_path)?);
-        }
-        Ok(findings)
-    }
+fn enable_instance(app_paths: &AppPaths, query: String) -> crate::core::Result<OperationMessage> {
+    let home = default_home_dir()?;
+    let instance = enable_skill_instance_by_query(SkillInstanceQueryRequest {
+        app_paths,
+        home_dir: &home,
+        query: &query,
+    })?;
+    Ok(operation_status("enable", &instance.name))
+}
+
+fn disable_instance(app_paths: &AppPaths, query: String) -> crate::core::Result<OperationMessage> {
+    let home = default_home_dir()?;
+    let instance = disable_skill_instance_by_query(SkillInstanceQueryRequest {
+        app_paths,
+        home_dir: &home,
+        query: &query,
+    })?;
+    Ok(operation_status("disable", &instance.name))
+}
+
+fn scan_skill(app_paths: &AppPaths, query: String) -> crate::core::Result<Vec<RiskFinding>> {
+    let skill = legacy_managed_skills(app_paths)?
+        .into_iter()
+        .find(|skill| skill.id.as_str() == query || skill.name == query)
+        .ok_or(SkillKitsError::SkillNotFound { query })?;
+    crate::core::scan::scan_skill_dir(&skill.managed_path)
 }
 
 fn doctor(app_paths: &AppPaths, fix: bool) -> crate::core::Result<DoctorReport> {
@@ -446,22 +544,10 @@ fn adopt_global_agent(
 fn project_status(
     app_paths: &AppPaths,
     args: ProjectStatusArgs,
-) -> crate::core::Result<Vec<DeploymentStatus>> {
+) -> crate::core::Result<Vec<SkillInstance>> {
     let project = project_path_or_cwd(args.project)?;
-    let deployments = crate::core::registry::read_deployments_registry(app_paths)?;
-    deployments
-        .deployments
-        .into_iter()
-        .filter(|record| record.project_path == project)
-        .map(|record| {
-            crate::core::project::project_deployment_status(
-                app_paths,
-                &project,
-                &record.agent_id,
-                &record.skill_name,
-            )
-        })
-        .collect()
+    let home = default_home_dir()?;
+    project_skill_instances(app_paths, &home, &project)
 }
 
 fn project_adopt(app_paths: &AppPaths, args: ProjectAgentArgs) -> crate::core::Result<AdoptReport> {
@@ -491,8 +577,11 @@ fn project_deploy(
         skill_query: &args.skill,
     })?;
     Ok(operation_status(
-        "project deploy",
-        &status.record.skill_name,
+        "legacy project deploy",
+        &format!(
+            "legacy managed-copy command; deployed {}",
+            status.record.skill_name
+        ),
     ))
 }
 
@@ -501,16 +590,15 @@ fn project_enable(
     args: ProjectSkillAgentArgs,
 ) -> crate::core::Result<OperationMessage> {
     let project = project_path_or_cwd(args.project)?;
-    let status = crate::core::project::enable_project_skill(ProjectSkillRequest {
+    let home = default_home_dir()?;
+    let status = enable_project_skill_instance(ProjectSkillInstanceRequest {
         app_paths,
+        home_dir: &home,
         project_path: &project,
         agent_id: &AgentId::new(args.agent),
         skill_query: &args.skill,
     })?;
-    Ok(operation_status(
-        "project enable",
-        &status.record.skill_name,
-    ))
+    Ok(operation_status("project enable", &status.name))
 }
 
 fn project_disable(
@@ -518,16 +606,15 @@ fn project_disable(
     args: ProjectSkillAgentArgs,
 ) -> crate::core::Result<OperationMessage> {
     let project = project_path_or_cwd(args.project)?;
-    let status = crate::core::project::disable_project_skill(ProjectSkillRequest {
+    let home = default_home_dir()?;
+    let status = disable_project_skill_instance(ProjectSkillInstanceRequest {
         app_paths,
+        home_dir: &home,
         project_path: &project,
         agent_id: &AgentId::new(args.agent),
         skill_query: &args.skill,
     })?;
-    Ok(operation_status(
-        "project disable",
-        &status.record.skill_name,
-    ))
+    Ok(operation_status("project disable", &status.name))
 }
 
 fn project_redeploy(
@@ -548,8 +635,8 @@ fn project_redeploy(
         RedeployOutcome::Promoted(skill) => format!("promoted {}", skill.id),
     };
     Ok(OperationMessage {
-        operation: "project redeploy".to_string(),
-        status,
+        operation: "legacy project redeploy".to_string(),
+        status: format!("legacy managed-copy command; {status}"),
     })
 }
 
@@ -565,7 +652,10 @@ fn project_remove(
         skill_query: &args.skill,
         force: args.force,
     })?;
-    Ok(operation_status("project remove", &args.skill))
+    Ok(operation_status(
+        "legacy project remove",
+        &format!("legacy managed-copy command; removed {}", args.skill),
+    ))
 }
 
 fn operation_status(operation: &str, subject: &str) -> OperationMessage {
@@ -580,16 +670,70 @@ fn project_path_or_cwd(project: Option<Utf8PathBuf>) -> crate::core::Result<Utf8
     Ok(scope.path)
 }
 
+fn scan_agent_spaces(app_paths: &AppPaths) -> crate::core::Result<SkillInstanceIndex> {
+    let home = default_home_dir()?;
+    refresh_skill_instance_index(app_paths, &home)
+}
+
+fn legacy_managed_skills(app_paths: &AppPaths) -> crate::core::Result<Vec<ManagedSkill>> {
+    Ok(crate::core::registry::read_skills_registry(app_paths)?.skills)
+}
+
+fn default_home_dir() -> crate::core::Result<Utf8PathBuf> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "home directory"))?;
+    Utf8PathBuf::from_path_buf(home).map_err(|path| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("home path is not UTF-8: {}", path.display()),
+        )
+        .into()
+    })
+}
+
+fn toggle_label(instance: &SkillInstance) -> String {
+    if !instance.writable
+        && matches!(
+            instance.toggle_state,
+            crate::core::registry::ToggleState::Enabled
+                | crate::core::registry::ToggleState::Disabled
+        )
+    {
+        return "Read-only".to_string();
+    }
+    match instance.toggle_state {
+        crate::core::registry::ToggleState::Enabled => "Enabled".to_string(),
+        crate::core::registry::ToggleState::Disabled => "Disabled".to_string(),
+        crate::core::registry::ToggleState::InvalidBothPresent => "Invalid".to_string(),
+        crate::core::registry::ToggleState::InvalidBothMissing => "Missing".to_string(),
+    }
+}
+
+fn scope_label(scope: &SkillInstanceScope) -> String {
+    match scope {
+        SkillInstanceScope::Global => "Global".to_string(),
+        SkillInstanceScope::Project { name, .. } => format!("Project / {name}"),
+    }
+}
+
+fn source_label(source: &SkillInstanceSourceKind) -> String {
+    match source {
+        SkillInstanceSourceKind::AgentSpace => "Agent Space".to_string(),
+        SkillInstanceSourceKind::ProjectAgentSpace => "Project Agent Space".to_string(),
+        SkillInstanceSourceKind::PluginCache => "Plugin cache".to_string(),
+        SkillInstanceSourceKind::Vendor => "Vendor".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{project_adopt, render_adopt, render_project_status, CliRunError};
     use crate::cli::args::{OutputFormat, ProjectAgentArgs};
     use crate::core::adopt::AdoptReport;
-    use crate::core::ids::{AgentId, SkillId};
+    use crate::core::agent_space::{SkillInstance, SkillInstanceScope, SkillInstanceSourceKind};
+    use crate::core::ids::AgentId;
     use crate::core::paths::AppPaths;
-    use crate::core::registry::{
-        read_skills_registry, DeploymentRecord, DeploymentStatus, ToggleState,
-    };
+    use crate::core::registry::{read_skills_registry, ToggleState};
     use camino::{Utf8Path, Utf8PathBuf};
     use tempfile::TempDir;
 
@@ -655,66 +799,67 @@ mod tests {
     }
 
     #[test]
-    fn project_status_table_reports_missing_managed_source() {
+    fn project_status_table_uses_native_agent_space_columns() {
         let output = render_project_status(
-            vec![DeploymentStatus {
-                record: DeploymentRecord {
-                    id: "deployment".to_string(),
-                    skill_id: SkillId::new("missing"),
-                    agent_id: AgentId::new("codex"),
-                    project_name: "project".to_string(),
-                    project_path: "/tmp/project".into(),
-                    deployment_path: "/tmp/project/.agents/skills/missing".into(),
-                    skill_name: "missing".to_string(),
-                    baseline_hash: "baseline".to_string(),
-                    deployed_from_hash: "deployed".to_string(),
-                    created_at: "2026-05-31T00:00:00Z".to_string(),
-                    updated_at: "2026-05-31T00:00:00Z".to_string(),
+            vec![SkillInstance {
+                id: "instance".to_string(),
+                name: "frontend-design".to_string(),
+                agent_id: AgentId::new("codex"),
+                scope: SkillInstanceScope::Project {
+                    name: "project".to_string(),
+                    path: "/tmp/project".into(),
                 },
-                toggle: ToggleState::Enabled,
-                current_hash: Some("baseline".to_string()),
-                drift: false,
-                outdated: false,
-                missing_managed_source: true,
+                skill_dir: "/tmp/project/.agents/skills/frontend-design".into(),
+                enabled_path: "/tmp/project/.agents/skills/frontend-design/SKILL.md".into(),
+                disabled_path: "/tmp/project/.agents/skills/frontend-design/SKILL.md.disabled"
+                    .into(),
+                toggle_state: ToggleState::Enabled,
+                source_kind: SkillInstanceSourceKind::ProjectAgentSpace,
+                writable: true,
+                metadata: None,
+                content_hash: Some("hash".to_string()),
+                updated_at: Some("2026-06-02T00:00:00Z".to_string()),
             }],
             OutputFormat::Table,
         )
         .unwrap()
         .unwrap();
 
-        assert!(output.contains("Missing Managed Source"));
+        assert!(output.contains("Skill Dir"));
+        assert!(output.contains("Writable"));
+        assert!(!output.contains("Missing Managed Source"));
+        assert!(!output.contains("Outdated"));
         assert!(output.contains("true"));
     }
 
     #[test]
     fn project_status_table_reports_project_skill_dir() {
         let output = render_project_status(
-            vec![DeploymentStatus {
-                record: DeploymentRecord {
-                    id: "deployment".to_string(),
-                    skill_id: SkillId::new("frontend-design"),
-                    agent_id: AgentId::new("codex"),
-                    project_name: "project".to_string(),
-                    project_path: "/tmp/project".into(),
-                    deployment_path: "/tmp/project/.agents/skills/frontend-design".into(),
-                    skill_name: "frontend-design".to_string(),
-                    baseline_hash: "baseline".to_string(),
-                    deployed_from_hash: "deployed".to_string(),
-                    created_at: "2026-05-31T00:00:00Z".to_string(),
-                    updated_at: "2026-05-31T00:00:00Z".to_string(),
+            vec![SkillInstance {
+                id: "instance".to_string(),
+                name: "frontend-design".to_string(),
+                agent_id: AgentId::new("codex"),
+                scope: SkillInstanceScope::Project {
+                    name: "project".to_string(),
+                    path: "/tmp/project".into(),
                 },
-                toggle: ToggleState::Enabled,
-                current_hash: Some("baseline".to_string()),
-                drift: false,
-                outdated: false,
-                missing_managed_source: false,
+                skill_dir: "/tmp/project/.agents/skills/frontend-design".into(),
+                enabled_path: "/tmp/project/.agents/skills/frontend-design/SKILL.md".into(),
+                disabled_path: "/tmp/project/.agents/skills/frontend-design/SKILL.md.disabled"
+                    .into(),
+                toggle_state: ToggleState::Enabled,
+                source_kind: SkillInstanceSourceKind::ProjectAgentSpace,
+                writable: true,
+                metadata: None,
+                content_hash: Some("hash".to_string()),
+                updated_at: Some("2026-06-02T00:00:00Z".to_string()),
             }],
             OutputFormat::Table,
         )
         .unwrap()
         .unwrap();
 
-        assert!(output.contains("Project Skill Dir"));
+        assert!(output.contains("Skill Dir"));
         assert!(output.contains("/tmp/project/.agents/skills/frontend-design"));
     }
 }

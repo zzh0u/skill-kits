@@ -49,6 +49,14 @@ fn clap_parses_documented_commands() {
         Some(Command::Uninstall { skill }) if skill == "frontend-design"
     ));
     assert!(matches!(
+        Cli::parse_from(["skill-kits", "enable", "instance-id"]).command,
+        Some(Command::Enable { query }) if query == "instance-id"
+    ));
+    assert!(matches!(
+        Cli::parse_from(["skill-kits", "disable", "instance-id"]).command,
+        Some(Command::Disable { query }) if query == "instance-id"
+    ));
+    assert!(matches!(
         Cli::parse_from(["skill-kits", "scan", "frontend-design", "--format", "json"]).command,
         Some(Command::Scan {
             skill: Some(skill),

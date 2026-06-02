@@ -1,24 +1,25 @@
 use crate::core::{
+    agents::configured_global_skill_dirs_for,
     config::read_config,
     error::{Result, SkillKitsError},
+    fs::{atomic_write_toml, safe_read_to_string},
     ids::{AgentId, SkillId},
-    paths::AppPaths,
-    registry::{
-        read_deployments_registry, read_skills_registry, DeploymentsRegistry, ManagedSkill,
-        SkillMetadata, SkillsRegistry, ToggleState,
-    },
+    lock::StateLock,
+    paths::{ensure_app_dirs, AppPaths},
+    registry::{SkillMetadata, ToggleState},
     skills::{disabled_skill_markdown_path, load_skill_metadata_from_file, skill_markdown_path},
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use walkdir::WalkDir;
 
-pub const AGENT_SPACE_PLUGIN_DEPTH: usize = 4;
+pub const AGENT_SPACE_PLUGIN_DEPTH: usize = 6;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SkillInstanceScope {
@@ -29,16 +30,14 @@ pub enum SkillInstanceScope {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SkillInstanceSourceKind {
     AgentSpace,
-    ProjectDeployment,
+    ProjectAgentSpace,
     PluginCache,
     Vendor,
-    ManagedInventory,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SkillInstance {
     pub id: String,
-    pub stable_id: Option<SkillId>,
     pub name: String,
     pub agent_id: AgentId,
     pub scope: SkillInstanceScope,
@@ -47,7 +46,6 @@ pub struct SkillInstance {
     pub disabled_path: Utf8PathBuf,
     pub toggle_state: ToggleState,
     pub source_kind: SkillInstanceSourceKind,
-    pub managed: bool,
     pub writable: bool,
     pub metadata: Option<SkillMetadata>,
     pub content_hash: Option<String>,
@@ -61,18 +59,128 @@ pub struct SkillInstanceRequest<'a> {
     pub instance_id: &'a str,
 }
 
+#[derive(Clone, Debug)]
+pub struct SkillInstanceQueryRequest<'a> {
+    pub app_paths: &'a AppPaths,
+    pub home_dir: &'a Utf8Path,
+    pub query: &'a str,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectSkillInstanceRequest<'a> {
+    pub app_paths: &'a AppPaths,
+    pub home_dir: &'a Utf8Path,
+    pub project_path: &'a Utf8Path,
+    pub agent_id: &'a AgentId,
+    pub skill_query: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SkillInstanceIndex {
+    pub version: u32,
+    pub last_scanned_at: String,
+    #[serde(default)]
+    pub instances: Vec<SkillInstance>,
+}
+
+impl Default for SkillInstanceIndex {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            last_scanned_at: String::new(),
+            instances: Vec::new(),
+        }
+    }
+}
+
+pub fn refresh_skill_instance_index(
+    app_paths: &AppPaths,
+    home_dir: &Utf8Path,
+) -> Result<SkillInstanceIndex> {
+    let index = SkillInstanceIndex {
+        version: 1,
+        last_scanned_at: now_string(),
+        instances: scan_agent_spaces(app_paths, home_dir)?,
+    };
+    write_skill_instance_index(app_paths, &index)?;
+    Ok(index)
+}
+
+pub fn read_skill_instance_index(app_paths: &AppPaths) -> Result<SkillInstanceIndex> {
+    ensure_app_dirs(app_paths)?;
+    let index = read_skill_instance_index_unlocked(app_paths)?;
+    if index_has_stale_paths(&index) {
+        if let Some(home_dir) = home_dir_for_index_rescan(app_paths, &index) {
+            return refresh_skill_instance_index(app_paths, &home_dir);
+        }
+    }
+    Ok(index)
+}
+
+pub fn write_skill_instance_index(app_paths: &AppPaths, index: &SkillInstanceIndex) -> Result<()> {
+    let _lock = StateLock::acquire(app_paths)?;
+    ensure_app_dirs(app_paths)?;
+    atomic_write_toml(&app_paths.skill_instance_index_file, index)
+}
+
+fn read_skill_instance_index_unlocked(app_paths: &AppPaths) -> Result<SkillInstanceIndex> {
+    if !app_paths.skill_instance_index_file.exists() {
+        return Ok(SkillInstanceIndex::default());
+    }
+
+    let contents = safe_read_to_string(&app_paths.skill_instance_index_file)?;
+    toml::from_str(&contents).map_err(|source| SkillKitsError::RegistryParse {
+        path: app_paths.skill_instance_index_file.clone(),
+        source,
+    })
+}
+
+fn index_has_stale_paths(index: &SkillInstanceIndex) -> bool {
+    index
+        .instances
+        .iter()
+        .any(|instance| !has_toggle_file(&instance.skill_dir))
+}
+
+fn home_dir_for_index_rescan(
+    app_paths: &AppPaths,
+    index: &SkillInstanceIndex,
+) -> Option<Utf8PathBuf> {
+    for instance in &index.instances {
+        if !matches!(instance.scope, SkillInstanceScope::Global) {
+            continue;
+        }
+        let dirs = configured_global_skill_dirs_for(app_paths, &instance.agent_id).ok()?;
+        for root in dirs {
+            if let Some(home_dir) = infer_home_dir_from_tilde_root(&instance.skill_dir, &root) {
+                return Some(home_dir);
+            }
+        }
+    }
+
+    dirs::home_dir().and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
+}
+
+fn infer_home_dir_from_tilde_root(skill_dir: &Utf8Path, root: &Utf8Path) -> Option<Utf8PathBuf> {
+    let rest = root.as_str().strip_prefix("~/")?;
+    let needle = format!("/{rest}/");
+    let index = skill_dir.as_str().find(&needle)?;
+    let home = &skill_dir.as_str()[..index];
+    if home.is_empty() {
+        return None;
+    }
+    Some(Utf8PathBuf::from(home))
+}
+
 pub fn scan_agent_spaces(app_paths: &AppPaths, home_dir: &Utf8Path) -> Result<Vec<SkillInstance>> {
     let config = read_config(app_paths)?;
-    let skills = read_skills_registry_if_present(app_paths)?.skills;
-    let deployments = read_deployments_registry_if_present(app_paths)?.deployments;
-    let managed_by_path = managed_by_path(&skills);
-    let managed_by_name = managed_by_name(&skills);
 
     let mut instances = Vec::new();
     let mut seen = HashSet::new();
 
     for agent in config.agents.iter().filter(|agent| agent.enabled) {
-        for root in &agent.global_skill_dirs {
+        let global_skill_dirs = configured_global_skill_dirs_for(app_paths, &agent.id)?;
+        for root in &global_skill_dirs {
             let root = expand_home(root, home_dir);
             let source_kind = source_kind_for_root(&root);
             let root_instances = if is_recursive_source(&source_kind) {
@@ -81,8 +189,6 @@ pub fn scan_agent_spaces(app_paths: &AppPaths, home_dir: &Utf8Path) -> Result<Ve
                     agent.id.clone(),
                     SkillInstanceScope::Global,
                     source_kind,
-                    &managed_by_path,
-                    &managed_by_name,
                 )?
             } else {
                 scan_immediate_root(
@@ -90,8 +196,6 @@ pub fn scan_agent_spaces(app_paths: &AppPaths, home_dir: &Utf8Path) -> Result<Ve
                     agent.id.clone(),
                     SkillInstanceScope::Global,
                     source_kind,
-                    &managed_by_path,
-                    &managed_by_name,
                 )?
             };
             push_unique(&mut instances, &mut seen, root_instances);
@@ -107,44 +211,10 @@ pub fn scan_agent_spaces(app_paths: &AppPaths, home_dir: &Utf8Path) -> Result<Ve
                         name: recent.name.clone(),
                         path: recent.path.clone(),
                     },
-                    SkillInstanceSourceKind::ProjectDeployment,
-                    &managed_by_path,
-                    &managed_by_name,
+                    SkillInstanceSourceKind::ProjectAgentSpace,
                 )?;
                 push_unique(&mut instances, &mut seen, root_instances);
             }
-        }
-    }
-
-    for deployment in deployments {
-        if toggle_state(&deployment.deployment_path) != ToggleState::InvalidBothMissing {
-            continue;
-        }
-        let metadata = None;
-        let content_hash = None;
-        let scope = SkillInstanceScope::Project {
-            name: deployment.project_name.clone(),
-            path: deployment.project_path.clone(),
-        };
-        let instance = SkillInstance {
-            id: instance_id(&deployment.agent_id, &scope, &deployment.deployment_path),
-            stable_id: Some(deployment.skill_id.clone()),
-            name: deployment.skill_name.clone(),
-            agent_id: deployment.agent_id,
-            enabled_path: skill_markdown_path(&deployment.deployment_path),
-            disabled_path: disabled_skill_markdown_path(&deployment.deployment_path),
-            skill_dir: deployment.deployment_path,
-            toggle_state: ToggleState::InvalidBothMissing,
-            source_kind: SkillInstanceSourceKind::ProjectDeployment,
-            managed: managed_by_name.contains_key(&deployment.skill_name),
-            writable: false,
-            metadata,
-            content_hash,
-            updated_at: Some(deployment.updated_at),
-            scope,
-        };
-        if seen.insert(instance.id.clone()) {
-            instances.push(instance);
         }
     }
 
@@ -169,7 +239,14 @@ pub fn enable_skill_instance(request: SkillInstanceRequest<'_>) -> Result<SkillI
     if instance.disabled_path.exists() {
         fs::rename(&instance.disabled_path, &instance.enabled_path)?;
     }
-    find_skill_instance(&request)
+    let index = refresh_skill_instance_index(request.app_paths, request.home_dir)?;
+    index
+        .instances
+        .into_iter()
+        .find(|instance| instance.id == request.instance_id)
+        .ok_or_else(|| SkillKitsError::SkillNotFound {
+            query: request.instance_id.to_string(),
+        })
 }
 
 pub fn disable_skill_instance(request: SkillInstanceRequest<'_>) -> Result<SkillInstance> {
@@ -178,7 +255,94 @@ pub fn disable_skill_instance(request: SkillInstanceRequest<'_>) -> Result<Skill
     if instance.enabled_path.exists() {
         fs::rename(&instance.enabled_path, &instance.disabled_path)?;
     }
-    find_skill_instance(&request)
+    let index = refresh_skill_instance_index(request.app_paths, request.home_dir)?;
+    index
+        .instances
+        .into_iter()
+        .find(|instance| instance.id == request.instance_id)
+        .ok_or_else(|| SkillKitsError::SkillNotFound {
+            query: request.instance_id.to_string(),
+        })
+}
+
+pub fn enable_skill_instance_by_query(
+    request: SkillInstanceQueryRequest<'_>,
+) -> Result<SkillInstance> {
+    let instance = find_skill_instance_by_query(
+        scan_agent_spaces(request.app_paths, request.home_dir)?,
+        request.query,
+    )?;
+    enable_skill_instance(SkillInstanceRequest {
+        app_paths: request.app_paths,
+        home_dir: request.home_dir,
+        instance_id: &instance.id,
+    })
+}
+
+pub fn disable_skill_instance_by_query(
+    request: SkillInstanceQueryRequest<'_>,
+) -> Result<SkillInstance> {
+    let instance = find_skill_instance_by_query(
+        scan_agent_spaces(request.app_paths, request.home_dir)?,
+        request.query,
+    )?;
+    disable_skill_instance(SkillInstanceRequest {
+        app_paths: request.app_paths,
+        home_dir: request.home_dir,
+        instance_id: &instance.id,
+    })
+}
+
+pub fn project_skill_instances(
+    app_paths: &AppPaths,
+    home_dir: &Utf8Path,
+    project_path: &Utf8Path,
+) -> Result<Vec<SkillInstance>> {
+    let mut instances = scan_agent_spaces(app_paths, home_dir)?
+        .into_iter()
+        .filter(|instance| matches_project_scope(&instance.scope, project_path))
+        .collect::<Vec<_>>();
+    instances.sort_by(|left, right| {
+        (
+            left.agent_id.as_str(),
+            left.skill_dir.file_name().unwrap_or(left.name.as_str()),
+            left.name.as_str(),
+        )
+            .cmp(&(
+                right.agent_id.as_str(),
+                right.skill_dir.file_name().unwrap_or(right.name.as_str()),
+                right.name.as_str(),
+            ))
+    });
+    Ok(instances)
+}
+
+pub fn project_skill_instance_status(
+    request: ProjectSkillInstanceRequest<'_>,
+) -> Result<SkillInstance> {
+    find_project_skill_instance(&request)
+}
+
+pub fn enable_project_skill_instance(
+    request: ProjectSkillInstanceRequest<'_>,
+) -> Result<SkillInstance> {
+    let instance = find_project_skill_instance(&request)?;
+    enable_skill_instance(SkillInstanceRequest {
+        app_paths: request.app_paths,
+        home_dir: request.home_dir,
+        instance_id: &instance.id,
+    })
+}
+
+pub fn disable_project_skill_instance(
+    request: ProjectSkillInstanceRequest<'_>,
+) -> Result<SkillInstance> {
+    let instance = find_project_skill_instance(&request)?;
+    disable_skill_instance(SkillInstanceRequest {
+        app_paths: request.app_paths,
+        home_dir: request.home_dir,
+        instance_id: &instance.id,
+    })
 }
 
 fn find_skill_instance(request: &SkillInstanceRequest<'_>) -> Result<SkillInstance> {
@@ -190,10 +354,74 @@ fn find_skill_instance(request: &SkillInstanceRequest<'_>) -> Result<SkillInstan
         })
 }
 
+fn find_project_skill_instance(request: &ProjectSkillInstanceRequest<'_>) -> Result<SkillInstance> {
+    let instances =
+        project_skill_instances(request.app_paths, request.home_dir, request.project_path)?
+            .into_iter()
+            .filter(|instance| instance.agent_id == *request.agent_id)
+            .collect::<Vec<_>>();
+    find_skill_instance_by_query(instances, request.skill_query)
+}
+
+fn find_skill_instance_by_query(
+    instances: Vec<SkillInstance>,
+    query: &str,
+) -> Result<SkillInstance> {
+    let mut matches = instances
+        .into_iter()
+        .filter(|instance| instance_matches_query(instance, query))
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        return Ok(matches.remove(0));
+    }
+    if matches.is_empty() {
+        return Err(SkillKitsError::SkillNotFound {
+            query: query.to_string(),
+        });
+    }
+    matches.sort_by(|left, right| left.id.cmp(&right.id));
+    Err(SkillKitsError::AmbiguousSkill {
+        query: query.to_string(),
+        matches: matches
+            .into_iter()
+            .map(|instance| SkillId::new(instance.id))
+            .collect(),
+    })
+}
+
+fn instance_matches_query(instance: &SkillInstance, query: &str) -> bool {
+    instance.id == query
+        || instance.name == query
+        || instance
+            .skill_dir
+            .file_name()
+            .is_some_and(|name| name == query)
+}
+
+fn matches_project_scope(scope: &SkillInstanceScope, project_path: &Utf8Path) -> bool {
+    let SkillInstanceScope::Project { path, .. } = scope else {
+        return false;
+    };
+    paths_refer_to_same_location(path, project_path)
+}
+
+fn paths_refer_to_same_location(left: &Utf8Path, right: &Utf8Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let left = fs::canonicalize(left.as_std_path())
+        .ok()
+        .and_then(|path| Utf8PathBuf::from_path_buf(path).ok());
+    let right = fs::canonicalize(right.as_std_path())
+        .ok()
+        .and_then(|path| Utf8PathBuf::from_path_buf(path).ok());
+    left.is_some() && left == right
+}
+
 fn ensure_instance_can_toggle(instance: &SkillInstance) -> Result<()> {
     let source_allows_toggle = matches!(
         instance.source_kind,
-        SkillInstanceSourceKind::AgentSpace | SkillInstanceSourceKind::ProjectDeployment
+        SkillInstanceSourceKind::AgentSpace | SkillInstanceSourceKind::ProjectAgentSpace
     );
     let valid_toggle = matches!(
         instance.toggle_state,
@@ -212,8 +440,6 @@ fn scan_immediate_root(
     agent_id: AgentId,
     scope: SkillInstanceScope,
     source_kind: SkillInstanceSourceKind,
-    managed_by_path: &HashMap<Utf8PathBuf, SkillId>,
-    managed_by_name: &HashMap<String, SkillId>,
 ) -> Result<Vec<SkillInstance>> {
     if !root.is_dir() {
         return Ok(Vec::new());
@@ -233,8 +459,6 @@ fn scan_immediate_root(
                 agent_id.clone(),
                 scope.clone(),
                 source_kind.clone(),
-                managed_by_path,
-                managed_by_name,
             )?);
         }
     }
@@ -246,8 +470,6 @@ fn scan_recursive_root(
     agent_id: AgentId,
     scope: SkillInstanceScope,
     source_kind: SkillInstanceSourceKind,
-    managed_by_path: &HashMap<Utf8PathBuf, SkillId>,
-    managed_by_name: &HashMap<String, SkillId>,
 ) -> Result<Vec<SkillInstance>> {
     if !root.is_dir() {
         return Ok(Vec::new());
@@ -279,28 +501,10 @@ fn scan_recursive_root(
                 agent_id.clone(),
                 scope.clone(),
                 source_kind.clone(),
-                managed_by_path,
-                managed_by_name,
             )?);
         }
     }
     Ok(instances)
-}
-
-fn read_skills_registry_if_present(app_paths: &AppPaths) -> Result<SkillsRegistry> {
-    if app_paths.skills_registry_file.exists() {
-        read_skills_registry(app_paths)
-    } else {
-        Ok(SkillsRegistry::default())
-    }
-}
-
-fn read_deployments_registry_if_present(app_paths: &AppPaths) -> Result<DeploymentsRegistry> {
-    if app_paths.deployments_registry_file.exists() {
-        read_deployments_registry(app_paths)
-    } else {
-        Ok(DeploymentsRegistry::default())
-    }
 }
 
 fn build_instance(
@@ -308,8 +512,6 @@ fn build_instance(
     agent_id: AgentId,
     scope: SkillInstanceScope,
     source_kind: SkillInstanceSourceKind,
-    managed_by_path: &HashMap<Utf8PathBuf, SkillId>,
-    managed_by_name: &HashMap<String, SkillId>,
 ) -> Result<SkillInstance> {
     let enabled_path = skill_markdown_path(&skill_dir);
     let disabled_path = disabled_skill_markdown_path(&skill_dir);
@@ -331,12 +533,6 @@ fn build_instance(
             .and_then(|metadata| metadata.title.clone())
             .unwrap_or_else(|| dir_name(&skill_dir))
     };
-    let stable_id = managed_by_path
-        .get(&skill_dir)
-        .cloned()
-        .or_else(|| managed_by_name.get(&name).cloned())
-        .or_else(|| managed_by_name.get(&dir_name(&skill_dir)).cloned());
-    let managed = stable_id.is_some();
     let content_hash = if matches!(toggle_state, ToggleState::Enabled | ToggleState::Disabled) {
         Some(hash_agent_skill_dir(&skill_dir)?)
     } else {
@@ -345,16 +541,13 @@ fn build_instance(
     let updated_at = toggle_file.and_then(file_updated_at);
     let read_only_source = matches!(
         source_kind,
-        SkillInstanceSourceKind::PluginCache
-            | SkillInstanceSourceKind::Vendor
-            | SkillInstanceSourceKind::ManagedInventory
+        SkillInstanceSourceKind::PluginCache | SkillInstanceSourceKind::Vendor
     );
     let valid_toggle = matches!(toggle_state, ToggleState::Enabled | ToggleState::Disabled);
     let writable = valid_toggle && !read_only_source && is_writable_dir(&skill_dir);
 
     Ok(SkillInstance {
         id: instance_id(&agent_id, &scope, &skill_dir),
-        stable_id,
         name,
         agent_id,
         scope,
@@ -363,7 +556,6 @@ fn build_instance(
         disabled_path,
         toggle_state,
         source_kind,
-        managed,
         writable,
         metadata,
         content_hash,
@@ -425,20 +617,6 @@ fn push_unique(
             instances.push(instance);
         }
     }
-}
-
-fn managed_by_path(skills: &[ManagedSkill]) -> HashMap<Utf8PathBuf, SkillId> {
-    skills
-        .iter()
-        .map(|skill| (skill.managed_path.clone(), skill.id.clone()))
-        .collect()
-}
-
-fn managed_by_name(skills: &[ManagedSkill]) -> HashMap<String, SkillId> {
-    skills
-        .iter()
-        .map(|skill| (skill.name.clone(), skill.id.clone()))
-        .collect()
 }
 
 fn expand_home(path: &Utf8Path, home_dir: &Utf8Path) -> Utf8PathBuf {
@@ -518,7 +696,7 @@ fn should_ignore_hash_path(path: &Utf8Path) -> bool {
 }
 
 fn is_noisy_dir(name: &str) -> bool {
-    name.starts_with('.')
+    (name.starts_with('.') && name != ".curated")
         || matches!(
             name,
             "node_modules"
@@ -551,6 +729,14 @@ fn file_updated_at(path: &Utf8Path) -> Option<String> {
         .ok()?
         .as_secs();
     Some(secs.to_string())
+}
+
+fn now_string() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{secs}")
 }
 
 fn scope_key(scope: &SkillInstanceScope) -> String {

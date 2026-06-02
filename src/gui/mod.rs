@@ -10,21 +10,16 @@ use eframe::egui;
 use state::{
     AgentEditorMode, GuiController, GuiModel, GuiScope, GuiStatusKind, NavigationView,
     RenderableView, UiColors, DRIFT_REMOVE_CONFIRMATION_MESSAGE,
-    GLOBAL_UNINSTALL_CONFIRMATION_MESSAGE, SKILL_INSTANCE_DISABLE_CONFIRMATION_MESSAGE,
+    SKILL_INSTANCE_DISABLE_CONFIRMATION_MESSAGE,
 };
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SkillAction {
-    InstallLocal,
     ScanAgentSpaces,
-    ImportManagedCopy,
     Enable,
     Disable,
-    Scan,
-    Deploy,
-    Uninstall,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,20 +61,6 @@ impl AgentAction {
 
 impl ProjectAction {
     const REFRESH: [Self; 1] = [Self::Refresh];
-    const ONBOARDING: [Self; 1] = [Self::AdoptAll];
-    const SELECTED_DISCOVERED: [Self; 2] = [Self::AdoptSelected, Self::AdoptAll];
-    const CONFLICT: [Self; 2] = [Self::ImportAsNew, Self::Skip];
-
-    const NORMAL: [Self; 6] = [
-        Self::Enable,
-        Self::Disable,
-        Self::Redeploy,
-        Self::Overwrite,
-        Self::Promote,
-        Self::Remove,
-    ];
-
-    const MISSING_MANAGED_SOURCE: [Self; 2] = [Self::Promote, Self::Remove];
 
     fn label(self) -> &'static str {
         match self {
@@ -102,45 +83,20 @@ impl ProjectAction {
 impl SkillAction {
     fn label(self) -> &'static str {
         match self {
-            Self::InstallLocal => "Install local",
             Self::ScanAgentSpaces => "Scan Agent Spaces",
-            Self::ImportManagedCopy => "Import managed copy",
             Self::Enable => "Enable",
             Self::Disable => "Disable",
-            Self::Scan => "Scan",
-            Self::Deploy => "Deploy",
-            Self::Uninstall => "Uninstall managed copy",
         }
     }
 }
 
 pub fn skill_actions(model: &GuiModel) -> Vec<SkillAction> {
-    let mut actions = vec![SkillAction::InstallLocal, SkillAction::ScanAgentSpaces];
-    if model.selected_skill().is_none() && model.selected_skill_instance().is_none() {
+    let mut actions = vec![SkillAction::ScanAgentSpaces];
+    if model.selected_skill_instance().is_none() {
         return actions;
     }
 
-    if model.selected_skill().is_some() {
-        actions.push(SkillAction::Scan);
-        if model.has_explicit_project_deploy_target() {
-            actions.push(SkillAction::Deploy);
-        }
-        actions.push(SkillAction::Uninstall);
-    }
     if let Some(instance) = model.selected_skill_instance() {
-        if instance.stable_id.is_none()
-            && matches!(
-                instance.source_kind,
-                crate::core::agent_space::SkillInstanceSourceKind::AgentSpace
-                    | crate::core::agent_space::SkillInstanceSourceKind::ProjectDeployment
-            )
-            && matches!(
-                instance.toggle_state,
-                ToggleState::Enabled | ToggleState::Disabled
-            )
-        {
-            actions.push(SkillAction::ImportManagedCopy);
-        }
         if instance.writable {
             match instance.toggle_state {
                 ToggleState::Enabled => actions.push(SkillAction::Disable),
@@ -167,70 +123,17 @@ pub fn agent_actions(model: &GuiModel) -> Vec<AgentAction> {
 }
 
 pub fn project_actions(model: &GuiModel) -> Vec<ProjectAction> {
-    let mut deploy_action = if model.has_project_deploy_target() {
-        vec![ProjectAction::Deploy]
-    } else {
-        Vec::new()
-    };
-
-    if model.selected_deployment_status().is_none() {
-        if model.selected_project_summary().is_none() {
-            return deploy_action;
-        }
-        if model
-            .selected_project_summary()
-            .is_some_and(|project| project.pending_conflicts.is_empty())
-            && model
-                .selected_project_summary()
-                .is_some_and(|project| project.discovered_unmanaged_count == 0)
-        {
-            deploy_action.extend(ProjectAction::REFRESH);
-            return deploy_action;
+    let mut actions = ProjectAction::REFRESH.to_vec();
+    if let Some(instance) = model.selected_skill_instance() {
+        if instance.writable {
+            match instance.toggle_state {
+                ToggleState::Enabled => actions.push(ProjectAction::Disable),
+                ToggleState::Disabled => actions.push(ProjectAction::Enable),
+                ToggleState::InvalidBothPresent | ToggleState::InvalidBothMissing => {}
+            }
         }
     }
-
-    if model
-        .selected_project_summary()
-        .is_some_and(|project| !project.pending_conflicts.is_empty())
-        && model.selected_deployment_status().is_none()
-    {
-        deploy_action.extend(ProjectAction::CONFLICT);
-        return deploy_action;
-    }
-
-    if model.selected_discovered_project_skill().is_some()
-        && model.selected_deployment_status().is_none()
-    {
-        deploy_action.extend(ProjectAction::SELECTED_DISCOVERED);
-        return deploy_action;
-    }
-
-    if model
-        .selected_project_summary()
-        .is_some_and(|project| project.discovered_unmanaged_count > project.pending_conflicts.len())
-        && model.selected_deployment_status().is_none()
-    {
-        deploy_action.extend(ProjectAction::ONBOARDING);
-        return deploy_action;
-    }
-
-    if model
-        .selected_deployment_status()
-        .is_some_and(crate::gui::projects::is_invalid_toggle)
-    {
-        return Vec::new();
-    }
-
-    if model
-        .selected_deployment_status()
-        .is_some_and(|status| status.missing_managed_source)
-    {
-        ProjectAction::MISSING_MANAGED_SOURCE.to_vec()
-    } else {
-        let mut actions = ProjectAction::NORMAL.to_vec();
-        deploy_action.append(&mut actions);
-        deploy_action
-    }
+    actions
 }
 
 pub struct SkillKitsGuiApp {
@@ -686,30 +589,19 @@ fn render_action_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCol
 fn render_skill_action_button(
     ui: &mut egui::Ui,
     model: &mut GuiModel,
-    colors: UiColors,
+    _colors: UiColors,
     action: SkillAction,
 ) {
     let label = action.label();
-    let clicked = if matches!(action, SkillAction::Uninstall) {
-        ui.button(egui::RichText::new(label).color(colors.danger))
-            .clicked()
-    } else {
-        ui.button(label).clicked()
-    };
+    let clicked = ui.button(label).clicked();
 
     if !clicked {
         return;
     }
 
     match action {
-        SkillAction::InstallLocal => {
-            model.begin_install_local_skill();
-        }
         SkillAction::ScanAgentSpaces => {
             let _ = model.request_scan_agent_spaces();
-        }
-        SkillAction::ImportManagedCopy => {
-            let _ = model.request_import_selected_skill_instance_as_managed_copy();
         }
         SkillAction::Enable => {
             let _ = model.request_enable_selected_skill_instance();
@@ -717,29 +609,10 @@ fn render_skill_action_button(
         SkillAction::Disable => {
             let _ = model.request_disable_selected_skill_instance_with_confirmation(false);
         }
-        SkillAction::Scan => {
-            let _ = model.request_scan_selected_skill();
-        }
-        SkillAction::Deploy => {
-            let _ = model.request_deploy_selected_skill_to_default_agent();
-        }
-        SkillAction::Uninstall => {
-            let _ = model.request_uninstall_selected_skill(false);
-        }
     }
 }
 
 fn render_skill_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColors) {
-    if model.pending_uninstall_confirmation().is_some() {
-        ui.label(egui::RichText::new(GLOBAL_UNINSTALL_CONFIRMATION_MESSAGE).color(colors.warning));
-        if ui
-            .button(egui::RichText::new("Confirm Uninstall").color(colors.danger))
-            .clicked()
-        {
-            let _ = model.confirm_pending_uninstall();
-        }
-        ui.add_space(4.0);
-    }
     if model
         .pending_disable_skill_instance_confirmation()
         .is_some()
@@ -754,22 +627,6 @@ fn render_skill_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColo
             let _ = model.confirm_pending_disable_skill_instance();
         }
         ui.add_space(4.0);
-    }
-
-    if let Some(draft) = model.install_local_skill_draft().cloned() {
-        let mut path_text = draft.path_text;
-        ui.label(egui::RichText::new("Local Skill path").color(colors.ink_subtle));
-        ui.text_edit_singleline(&mut path_text);
-        model.update_install_local_skill_path(path_text);
-        ui.horizontal(|ui| {
-            if ui.button("Install").clicked() {
-                let _ = model.request_save_install_local_skill();
-            }
-            if ui.button("Cancel").clicked() {
-                model.cancel_install_local_skill();
-            }
-        });
-        return;
     }
 
     ui.horizontal(|ui| {

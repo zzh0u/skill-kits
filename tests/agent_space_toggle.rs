@@ -1,8 +1,10 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use skill_kits::core::{
     agent_space::{
-        disable_skill_instance, enable_skill_instance, scan_agent_spaces, SkillInstanceRequest,
-        SkillInstanceSourceKind,
+        disable_project_skill_instance, disable_skill_instance, enable_project_skill_instance,
+        enable_skill_instance, project_skill_instances, read_skill_instance_index,
+        refresh_skill_instance_index, scan_agent_spaces, ProjectSkillInstanceRequest,
+        SkillInstanceRequest, SkillInstanceSourceKind,
     },
     agents::{AgentConfig, AgentKind},
     config::{write_config, Config, RecentProject},
@@ -273,7 +275,7 @@ fn toggle_blocks_plugin_vendor_invalid_and_missing_instances() {
     .unwrap();
 
     let instances = scan_agent_spaces(&paths, &home).unwrap();
-    for skill_dir in [&plugin, &vendor, &invalid, &missing] {
+    for skill_dir in [&plugin, &vendor, &invalid] {
         let instance = instances
             .iter()
             .find(|instance| instance.skill_dir == *skill_dir)
@@ -281,6 +283,12 @@ fn toggle_blocks_plugin_vendor_invalid_and_missing_instances() {
         let err = disable_skill_instance(request(&paths, &home, &instance.id)).unwrap_err();
         assert!(matches!(err, SkillKitsError::InvalidToggleState { .. }));
     }
+    assert!(
+        instances
+            .iter()
+            .all(|instance| instance.skill_dir != missing),
+        "stale deployment registry rows are not native toggle instances"
+    );
 
     let plugin_instance = instances
         .iter()
@@ -291,4 +299,121 @@ fn toggle_blocks_plugin_vendor_invalid_and_missing_instances() {
         SkillInstanceSourceKind::PluginCache
     );
     assert!(!plugin.join("SKILL.md.disabled").exists());
+}
+
+#[test]
+fn project_status_and_toggle_use_native_agent_space_not_deployment_records() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let home = home_path(&temp_dir);
+    let project = Utf8PathBuf::from_path_buf(temp_dir.path().join("sample-app")).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    write_config_for_codex(
+        &paths,
+        vec![RecentProject {
+            name: "sample-app".to_string(),
+            path: project.clone(),
+            last_opened_at: "2026-06-01T00:00:00Z".to_string(),
+        }],
+        vec!["~/.codex/skills".into()],
+    );
+    let native_skill = project.join(".agents/skills/native-only");
+    write_skill_file(&native_skill, "SKILL.md", "# Native Only\n");
+    let legacy_skill = project.join(".agents/skills/legacy-only");
+    write_deployments_registry(
+        &paths,
+        &DeploymentsRegistry {
+            version: 1,
+            deployments: vec![DeploymentRecord {
+                id: "codex-legacy-only-sample-app".to_string(),
+                skill_id: SkillId::new("legacy-only-managed"),
+                agent_id: AgentId::new("codex"),
+                project_name: "sample-app".to_string(),
+                project_path: project.clone(),
+                deployment_path: legacy_skill.clone(),
+                skill_name: "legacy-only".to_string(),
+                baseline_hash: "baseline".to_string(),
+                deployed_from_hash: "source".to_string(),
+                created_at: "2026-06-01T00:00:00Z".to_string(),
+                updated_at: "2026-06-01T00:00:00Z".to_string(),
+            }],
+        },
+    )
+    .unwrap();
+    let deployments_before = std::fs::read_to_string(&paths.deployments_registry_file).unwrap();
+
+    let project_instances = project_skill_instances(&paths, &home, &project).unwrap();
+
+    assert_eq!(project_instances.len(), 1);
+    assert_eq!(project_instances[0].skill_dir, native_skill);
+    assert!(project_instances
+        .iter()
+        .all(|instance| instance.skill_dir != legacy_skill));
+
+    let disabled = disable_project_skill_instance(ProjectSkillInstanceRequest {
+        app_paths: &paths,
+        home_dir: &home,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: "native-only",
+    })
+    .unwrap();
+
+    assert_eq!(disabled.toggle_state, ToggleState::Disabled);
+    assert!(native_skill.join("SKILL.md.disabled").exists());
+    assert_eq!(
+        std::fs::read_to_string(&paths.deployments_registry_file).unwrap(),
+        deployments_before
+    );
+
+    let indexed = read_skill_instance_index(&paths)
+        .unwrap()
+        .instances
+        .into_iter()
+        .find(|instance| instance.skill_dir == native_skill)
+        .expect("indexed toggled project instance");
+    assert_eq!(indexed.toggle_state, ToggleState::Disabled);
+
+    let enabled = enable_project_skill_instance(ProjectSkillInstanceRequest {
+        app_paths: &paths,
+        home_dir: &home,
+        project_path: &project,
+        agent_id: &AgentId::new("codex"),
+        skill_query: &disabled.id,
+    })
+    .unwrap();
+
+    assert_eq!(enabled.toggle_state, ToggleState::Enabled);
+    assert!(native_skill.join("SKILL.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(&paths.deployments_registry_file).unwrap(),
+        deployments_before
+    );
+}
+
+#[test]
+fn native_toggle_refreshes_skill_instance_index() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let home = home_path(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_config_for_codex(&paths, Vec::new(), vec!["~/.codex/skills".into()]);
+    let skill_dir = home.join(".codex/skills/indexed-toggle");
+    write_skill_file(&skill_dir, "SKILL.md", "# Indexed Toggle\n");
+    let instance_id = refresh_skill_instance_index(&paths, &home)
+        .unwrap()
+        .instances[0]
+        .id
+        .clone();
+
+    disable_skill_instance(request(&paths, &home, &instance_id)).unwrap();
+
+    let index = read_skill_instance_index(&paths).unwrap();
+    let instance = index
+        .instances
+        .into_iter()
+        .find(|instance| instance.id == instance_id)
+        .expect("indexed toggled instance");
+    assert_eq!(instance.toggle_state, ToggleState::Disabled);
 }

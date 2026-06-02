@@ -1,12 +1,14 @@
 # Agent Space Skill Management Spec
 
-Status: frozen for implementation planning on 2026-06-01.
+Status: intent frozen for hard-cut implementation planning on 2026-06-02.
 
 ## Goal
 
-Skill-kits must manage the places Agents actually read from. A Skill is enabled when the Agent Space contains `SKILL.md`; it is disabled when the same Skill directory contains `SKILL.md.disabled`.
+Skill-kits must hard-cut from managed-copy deployment to native Agent Space management. The directories Agents actually read from are the only source of truth. A Skill is enabled when the native Skill directory contains `SKILL.md`; it is disabled when the same directory contains `SKILL.md.disabled`.
 
-The Registry is not the enablement source of truth. It may support legacy records, summaries, risk reports, recovery, and managed inventory metadata, but Tranche 1 Agent Space scans do not write Registry state.
+The old Managed Inventory copy and Project Deployment Registry are legacy state. They must not participate in the core read/write paths for `list`, `status`, `project status`, `enable`, or `disable`.
+
+TOML remains the persistence format. The new persisted model is a Skill Instance index: a cache of native Agent Space scan results, not the source of truth. When the index and disk disagree, disk wins and the affected scope is rescanned.
 
 ## Core Principle
 
@@ -14,28 +16,27 @@ The Registry is not the enablement source of truth. It may support legacy record
 Agent reads it there, Skill-kits manages it there.
 ```
 
-`SKILL.md` and `SKILL.md.disabled` are the toggle truth. A Registry flag must never be treated as sufficient to disable a Skill that an Agent can still see on disk.
+`SKILL.md` and `SKILL.md.disabled` are the toggle truth. A Registry flag, Managed Inventory copy, or Deployment Record must never be treated as sufficient to enable or disable a Skill that an Agent reads from disk.
 
 ## Concepts
 
 **Agent Space** is any configured directory tree an enabled Agent reads for Skills. Examples include `~/.codex/skills`, `~/.claude/skills`, `~/.gemini/skills`, and project-local directories such as `<project>/.agents/skills`.
 
-**Skill Instance** is one physical Skill directory discovered in an Agent Space. The Skills view is instance-first in Tranche 1: one row equals one `skill_dir`.
+**Skill Instance** is one physical Skill directory discovered in an Agent Space. The product is instance-first: one row equals one `skill_dir`.
 
-**Managed Inventory** is the Skill-kits-owned install/source area such as `~/.skill-kits/skills`. It remains useful for local install, deploy, backup, and managed-copy workflows, but it is not the Skills view's enablement truth.
+**Skill Instance Index** is the TOML cache produced by scanning Agent Spaces. It records native Skill Instances for fast CLI/GUI reads, but it is not authoritative. Disk is authoritative.
 
-**Scan Read Model** is the in-memory model produced by scanning Agent Spaces. Tranche 1 uses this model directly and does not persist discovered instances to `skills.toml`.
+**Legacy Managed Inventory** is the old Skill-kits-owned copy area such as `~/.skill-kits/skills`. Hard-cut v1 ignores it for core listing, status, project status, enable, and disable. It may be reported by `doctor` as legacy state, but it is not a primary product surface.
 
-**Import Managed Copy** is the explicit operation that copies an Agent Space Skill into Managed Inventory. It replaces ambiguous "Adopt" wording for copy/import behavior.
+**Legacy Deployment** is any old copy from Managed Inventory into a project Agent Space. Hard-cut v1 does not use Deployment Records to decide status or toggle behavior.
 
 ## SkillInstance Model
 
-The implementation should introduce a render/core model equivalent to:
+The implementation should introduce a core/index model equivalent to:
 
 ```rust
 pub struct SkillInstance {
     pub id: String,
-    pub stable_id: Option<SkillId>,
     pub name: String,
     pub agent_id: AgentId,
     pub scope: SkillInstanceScope,
@@ -44,7 +45,6 @@ pub struct SkillInstance {
     pub disabled_path: Utf8PathBuf,
     pub toggle_state: ToggleState,
     pub source_kind: SkillInstanceSourceKind,
-    pub managed: bool,
     pub writable: bool,
     pub metadata: Option<SkillMetadata>,
     pub content_hash: Option<String>,
@@ -58,9 +58,35 @@ pub struct SkillInstance {
 hash(agent_id + scope_key + canonical skill_dir path)
 ```
 
-It must not include Skill name or content hash, because renaming `SKILL.md` or editing content must not change row identity.
+It must not include Skill name or content hash, because renaming `SKILL.md` or editing content must not change row identity. Same-name Skills in different Agents, projects, or directories are separate instances.
 
-`stable_id` or `skill_id` is only an association hook for managed copies, risk findings, and legacy deployment records. It is not the identity used for selection or toggle.
+The core model intentionally omits `stable_id`, `managed`, `baseline_hash`, and deployment metadata from the toggle path. Those concepts belong to legacy reporting, not native instance management.
+
+## Index TOML
+
+Persist scan results in a new TOML file, for example `registry/skill_instances.toml`:
+
+```toml
+version = 1
+last_scanned_at = "2026-06-02T00:00:00Z"
+
+[[instances]]
+id = "..."
+agent_id = "codex"
+scope = "project"
+project_path = "/Users/me/work/app"
+name = "reviewer"
+skill_dir = "/Users/me/work/app/.agents/skills/reviewer"
+enabled_path = "/Users/me/work/app/.agents/skills/reviewer/SKILL.md"
+disabled_path = "/Users/me/work/app/.agents/skills/reviewer/SKILL.md.disabled"
+toggle_state = "enabled"
+source_kind = "project_agent_space"
+writable = true
+content_hash = "..."
+updated_at = "2026-06-02T00:00:00Z"
+```
+
+The index supports fast reads and selection. It is not a Registry sync target and does not import, copy, adopt, deploy, redeploy, remove, or mutate Skills.
 
 ## Toggle State
 
@@ -71,13 +97,13 @@ Toggle state is derived from the filesystem:
 | `SKILL.md` only | `Enabled` |
 | `SKILL.md.disabled` only | `Disabled` |
 | both files | `InvalidBothPresent` |
-| neither file, but a legacy record references the directory | `InvalidBothMissing` / `Missing` |
+| neither file, but the index references the directory | `InvalidBothMissing` / stale index |
 
 Disabled is a valid state. Metadata and content hash should be read from `SKILL.md.disabled`, with hash path normalization treating `SKILL.md.disabled` as `SKILL.md` so enable/disable rename does not change content identity.
 
-`InvalidBothPresent` is strict: use the directory name, do not compute normal metadata or content hash, disable toggle, and show both file paths in the Inspector. Tranche 1 does not auto-repair this state.
+`InvalidBothPresent` is strict: use the directory name, do not compute normal metadata or content hash, disable toggle, and show both file paths in the Inspector. Hard-cut v1 does not auto-repair this state.
 
-Pure filesystem scanning should not invent both-missing rows. Missing rows only appear when a legacy Registry or deployment record points to a Skill directory whose toggle file is gone.
+Pure filesystem scanning should not invent both-missing rows. Missing rows only appear as stale-index or doctor diagnostics, not as normal Skill rows.
 
 ## Scan Rules
 
@@ -87,7 +113,7 @@ Routine Agent Space scan covers:
 - all enabled Agents' project Skill directories inside Recent Projects
 - read-only plugin/cache/vendor roots that the Agent configuration declares as visible to the Agent
 
-Routine scan does not run a workspace crawler. HarnessKit-style `Discover Projects(root)` is deferred to GUI productization in Tranche 3 or 4.
+Routine scan does not run a workspace crawler. HarnessKit-style `Discover Projects(root)` is deferred.
 
 Normal Agent Space roots use immediate-child scanning:
 
@@ -98,21 +124,20 @@ Normal Agent Space roots use immediate-child scanning:
 
 Plugin/cache/vendor roots use bounded recursive discovery, maximum depth 4. Discovery stops at the first directory containing `SKILL.md` or `SKILL.md.disabled`. It should skip hidden and common generated/noisy directories such as `node_modules`, `target`, `__pycache__`, `vendor`, `dist`, `build`, `venv`, and `.venv`.
 
-Tranche 1 scans do not write the Registry. They may read Registry state to mark `managed`, show legacy deployment links, or surface missing legacy records.
+Scans write only the Skill Instance Index. They do not write `skills.toml` or `deployments.toml`.
 
 ## Source Kinds
 
-Source kind drives both copy and toggle behavior:
+Source kind drives toggle behavior:
 
 | Source kind | Meaning | Toggle |
 | --- | --- | --- |
 | `AgentSpace` | Writable global Agent Space | Allowed when writable |
-| `ProjectDeployment` | Writable project Agent Space | Allowed when writable |
+| `ProjectAgentSpace` | Writable project Agent Space | Allowed when writable |
 | `PluginCache` | Agent-visible plugin cache | Read-only |
 | `Vendor` | Agent-visible vendor/import cache | Read-only |
-| `ManagedInventory` | Skill-kits-owned source/inventory copy | Not part of instance table by default |
 
-`~/.skills-manager/skills` must not remain in Codex built-in global Agent Space defaults. If it is shown, it should be shown as managed/source summary, not as a Codex-readable Agent Space unless an Agent config explicitly declares it.
+`~/.skills-manager/skills` must not remain in Codex built-in global Agent Space defaults. If shown at all, it is legacy/source information, not a Codex-readable Agent Space unless an Agent config explicitly declares it.
 
 ## Toggle Rules
 
@@ -130,7 +155,7 @@ Disable:
 SKILL.md -> SKILL.md.disabled
 ```
 
-The operation must not delete the Skill directory, mutate Managed Inventory, write an enablement flag to Registry, or affect same-name copies in other scopes.
+The operation must not delete the Skill directory, mutate Legacy Managed Inventory, write an enablement flag to Registry, or affect same-name copies in other scopes.
 
 Toggle is blocked when:
 
@@ -138,7 +163,23 @@ Toggle is blocked when:
 - both toggle files are missing
 - the instance path is not writable
 - the source kind is `PluginCache` or `Vendor`
-- the selected row is only a Managed Inventory summary
+
+After toggle, Skill-kits refreshes the affected scope and updates the Skill Instance Index. If a command targets a stale index entry whose path no longer exists, it rescans the relevant scope before returning a not-found or ambiguity error.
+
+## CLI Shape
+
+Core commands use native instances:
+
+- `skill-kits scan` refreshes the Skill Instance Index.
+- `skill-kits list` lists native Skill Instances from the index, with stale path recovery.
+- `skill-kits status` reports Agent count, global/project instance count, invalid count, read-only count, and last scan time.
+- `skill-kits enable <instance-id-or-query>` toggles the selected native instance.
+- `skill-kits disable <instance-id-or-query>` toggles the selected native instance.
+- `skill-kits project status --project <path>` scans/reads project native Agent Spaces.
+- `skill-kits project enable <name-or-id> --agent <agent> --project <path>` toggles a project native instance.
+- `skill-kits project disable <name-or-id> --agent <agent> --project <path>` toggles a project native instance.
+
+Old copy-model commands (`install local`, `project deploy`, `project redeploy`, `project remove`, managed-copy import/uninstall) are hidden or return explicit legacy warnings in hard-cut v1. If a future install capability is needed, use new wording such as `add-local --to-agent --scope` and copy directly into a native Agent Space.
 
 ## GUI Shape
 
@@ -148,16 +189,15 @@ The primary GUI views are:
 Dashboard / Skill / Agent / Project
 ```
 
-The Skill view shows Agent Space scan results, not only Managed Inventory. Tranche 1 is instance-first: one row equals one physical Skill directory.
+The Skill view shows native Agent Space scan results. Hard-cut v1 is instance-first: one row equals one physical Skill directory.
 
-The Skill view should expose these instance fields:
+The Skill view should expose:
 
 - Skill
 - Agent
 - Scope
 - Status
 - Source
-- Managed
 - Updated
 
 Status values:
@@ -175,20 +215,15 @@ The Inspector shows:
 - Agent
 - Scope
 - writable/read-only state
-- managed/unmanaged state
 - metadata
 - content hash when available
 - risk findings when available
-- project deployment links when available
 
 Action wording:
 
-- `Scan Agent Spaces` refreshes the read model.
-- `Install local` imports a local Skill into Managed Inventory.
-- `Import managed copy` copies an Agent Space Skill into Managed Inventory.
-- `Deploy to Project` copies from Managed Inventory into a project Agent Space.
+- `Scan Agent Spaces` refreshes the Skill Instance Index.
 - `Enable` / `Disable` rename the selected instance toggle file only.
-- `Uninstall managed copy` removes only the Managed Inventory copy.
+- Legacy `Install local`, `Deploy to Project`, `Redeploy`, `Remove`, `Import managed copy`, and `Uninstall managed copy` actions are hidden or replaced with legacy warnings in hard-cut v1.
 
 Disable copy:
 
@@ -197,17 +232,18 @@ Disable changes SKILL.md to SKILL.md.disabled in the Agent Space.
 It does not delete the Skill directory.
 ```
 
-Dashboard primary counts should lead with Agent Space instances. Managed Inventory becomes a secondary summary.
+Dashboard primary counts lead with Agent Space instances. Legacy Managed Inventory can appear only as a doctor/legacy warning.
 
 ## Tranches
 
-### Tranche 1: Agent Space Scan / Read Model
+### Tranche 1: Native Skill Instance Index
 
-- Add `SkillInstance` or equivalent render model.
+- Add `SkillInstance` and `SkillInstanceIndex`.
 - Scan enabled Agent global dirs and Recent Projects.
 - Recognize `SKILL.md.disabled`.
-- Show Agent Space instances in the Skill view.
-- Keep scans read-only and Registry-free.
+- Persist scan results to TOML.
+- Show native instances in CLI and GUI.
+- Keep scans copy-free and legacy Registry-free.
 - Treat plugin/cache/vendor as read-only.
 
 Tests:
@@ -215,42 +251,47 @@ Tests:
 - enabled instance
 - disabled instance
 - invalid both present
-- legacy both missing / missing
 - plugin/cache/vendor read-only
 - Recent Projects project scan
+- stale index path triggers rescan
+- legacy `skills.toml` and `deployments.toml` ignored for list/status/toggle
 
-### Tranche 2: Toggle
+### Tranche 2: Native Toggle
 
 - Enable/disable through rename only.
 - Restrict toggle to writable Agent Space instances.
 - Block invalid, missing, plugin/cache/vendor, and read-only paths.
+- `project status`, `project enable`, and `project disable` use native project Agent Space scan/index data, not Deployment Records.
 
 Tests:
 
 - disable does not delete directory
-- enable/disable does not mutate Managed Inventory
+- enable/disable does not mutate Legacy Managed Inventory
 - toggle does not affect unrelated project/global copies
 - rescan preserves disabled state
+- same-name project/global instances stay isolated
 
-### Tranche 3: GUI Productization
+### Tranche 3: CLI/GUI Productization
 
 - Status column and filters.
 - Agent and Scope filters.
 - Inspector copy for invalid/read-only state.
 - Inline confirmation copy for disable.
-- Optional `Discover Projects(root)` entry point modeled after HarnessKit.
+- Optional `Discover Projects(root)` entry point.
 
-### Tranche 4: Inventory Relationship Cleanup
+### Tranche 4: Legacy Cleanup
 
-- Rename ambiguous Adopt surfaces.
-- Make `Import managed copy` an explicit secondary action.
-- Update Dashboard counts to Agent Space instances plus Managed Inventory summary.
-- Keep Registry as auxiliary cache/recovery state, not enablement truth.
+- Add `doctor` checks for Legacy Managed Inventory and Deployment Records.
+- Add optional legacy cleanup commands only after the hard-cut model is stable.
+- Keep old registry files readable by old releases by not deleting them automatically.
 
 ## Non-goals
 
 - Do not implement `skill-kits run codex`.
 - Do not add a scheduler or launcher integration.
 - Do not rely on `enabled=false` Registry flags for Agent-visible Skills.
-- Do not bulk-copy all Agent Space Skills into Managed Inventory by default.
+- Do not bulk-copy all Agent Space Skills into Legacy Managed Inventory by default.
 - Do not modify plugin/cache/vendor roots by default.
+- Do not add SQLite in hard-cut v1.
+- Do not automatically migrate, delete, or rewrite old Managed Inventory and Deployment Registry data.
+- Do not support MCP, Plugin, Hook, CLI, marketplace, or remote update checks in this hard-cut scope.
