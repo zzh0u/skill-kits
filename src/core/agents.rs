@@ -80,11 +80,7 @@ pub fn built_in_agents() -> Vec<BuiltInAgent> {
         BuiltInAgent {
             id: "codex",
             label: "Codex",
-            global_dirs: &[
-                "~/.codex/skills",
-                "~/.codex/plugins/cache",
-                "~/.codex/vendor_imports",
-            ],
+            global_dirs: &["~/.agents/skills", "~/.codex/skills"],
             project_dir: ".agents/skills",
         },
         BuiltInAgent {

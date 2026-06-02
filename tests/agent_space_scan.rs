@@ -53,6 +53,11 @@ fn write_test_config(paths: &AppPaths, home: &Utf8Path, recent_projects: Vec<Rec
     std::fs::create_dir_all(home).unwrap();
 }
 
+#[cfg(unix)]
+fn symlink_dir(source: &Utf8Path, link: &Utf8Path) {
+    std::os::unix::fs::symlink(source, link).unwrap();
+}
+
 #[test]
 fn scan_agent_spaces_finds_enabled_and_disabled_global_instances() {
     let temp_dir = TempDir::new().unwrap();
@@ -275,37 +280,54 @@ fn plugin_cache_and_vendor_are_bounded_recursive_read_only_instances() {
 }
 
 #[test]
-fn built_in_codex_scan_includes_default_plugin_and_vendor_roots() {
+fn built_in_codex_scan_defaults_to_native_agent_space_roots_only() {
     let temp_dir = TempDir::new().unwrap();
     let paths = test_paths(&temp_dir);
     let home = home_path(&temp_dir);
+    let project = Utf8PathBuf::from_path_buf(temp_dir.path().join("sample-app")).unwrap();
     ensure_app_dirs(&paths).unwrap();
     write_config(
         &paths,
         &Config {
-            agents: vec![AgentConfig {
-                id: AgentId::new("codex"),
-                label: "Codex".to_string(),
-                kind: AgentKind::BuiltIn,
-                global_skill_dirs: vec!["~/.codex/skills".into()],
-                project_skill_dirs: vec![".agents/skills".into()],
-                enabled: true,
+            recent_projects: vec![RecentProject {
+                name: "sample-app".to_string(),
+                path: project.clone(),
+                last_opened_at: "2026-06-01T00:00:00Z".to_string(),
             }],
-            recent_projects: Vec::new(),
             ..Config::default()
         },
     )
     .unwrap();
 
+    let agents_skill = home.join(".agents/skills/agents-native-skill");
+    write_skill_file(&agents_skill, "SKILL.md", "# Agents Native Skill\n");
     let native_skill = home.join(".codex/skills/native-skill");
     write_skill_file(&native_skill, "SKILL.md", "# Native Skill\n");
+    let project_skill = project.join(".agents/skills/project-skill");
+    write_skill_file(&project_skill, "SKILL.md", "# Project Skill\n");
     let plugin_skill =
         home.join(".codex/plugins/cache/openai-curated/vercel/8770e9d2/skills/plugin-skill");
     write_skill_file(&plugin_skill, "SKILL.md", "# Plugin Skill\n");
     let vendor_skill = home.join(".codex/vendor_imports/skills/skills/.curated/vendor-skill");
     write_skill_file(&vendor_skill, "SKILL.md", "# Vendor Skill\n");
+    let skills_manager_skill = home.join(".skills-manager/skills/manager-only-skill");
+    write_skill_file(
+        &skills_manager_skill,
+        "SKILL.md",
+        "# Manager Only Skill\n",
+    );
 
     let instances = scan_agent_spaces(&paths, &home).unwrap();
+
+    let agents_native = instances
+        .iter()
+        .find(|instance| instance.skill_dir == agents_skill)
+        .expect("~/.agents native instance");
+    assert_eq!(
+        agents_native.source_kind,
+        SkillInstanceSourceKind::AgentSpace
+    );
+    assert!(agents_native.writable);
 
     let native = instances
         .iter()
@@ -314,19 +336,60 @@ fn built_in_codex_scan_includes_default_plugin_and_vendor_roots() {
     assert_eq!(native.source_kind, SkillInstanceSourceKind::AgentSpace);
     assert!(native.writable);
 
-    let plugin = instances
+    let project_native = instances
         .iter()
-        .find(|instance| instance.skill_dir == plugin_skill)
-        .expect("plugin instance from default root");
-    assert_eq!(plugin.source_kind, SkillInstanceSourceKind::PluginCache);
-    assert!(!plugin.writable);
+        .find(|instance| instance.skill_dir == project_skill)
+        .expect("project native instance");
+    assert_eq!(
+        project_native.source_kind,
+        SkillInstanceSourceKind::ProjectAgentSpace
+    );
 
-    let vendor = instances
+    assert!(
+        instances
+            .iter()
+            .all(|instance| instance.skill_dir != plugin_skill),
+        "Codex plugin package Skills are plugin-provided capabilities, not native SkillInstances"
+    );
+    assert!(
+        instances
+            .iter()
+            .all(|instance| instance.skill_dir != vendor_skill),
+        "Codex vendor/import cache must not be a native Skill root by default"
+    );
+    assert!(
+        instances
+            .iter()
+            .all(|instance| instance.skill_dir != skills_manager_skill),
+        "~/.skills-manager/skills is not a Codex native Skill root by default"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_skills_symlink_to_skills_manager_is_native_agent_space_instance() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let home = home_path(&temp_dir);
+    ensure_app_dirs(&paths).unwrap();
+    write_config(&paths, &Config::default()).unwrap();
+
+    let manager_skill = home.join(".skills-manager/skills/linked-skill");
+    write_skill_file(&manager_skill, "SKILL.md", "# Linked Skill\n");
+    let codex_root = home.join(".codex/skills");
+    std::fs::create_dir_all(&codex_root).unwrap();
+    let codex_link = codex_root.join("linked-skill");
+    symlink_dir(&manager_skill, &codex_link);
+
+    let instances = scan_agent_spaces(&paths, &home).unwrap();
+
+    let instance = instances
         .iter()
-        .find(|instance| instance.skill_dir == vendor_skill)
-        .expect("vendor instance from default root");
-    assert_eq!(vendor.source_kind, SkillInstanceSourceKind::Vendor);
-    assert!(!vendor.writable);
+        .find(|instance| instance.skill_dir == codex_link)
+        .expect("symlinked Codex native instance");
+    assert_eq!(instance.source_kind, SkillInstanceSourceKind::AgentSpace);
+    assert_eq!(instance.toggle_state, ToggleState::Enabled);
+    assert!(instance.writable);
 }
 
 #[test]

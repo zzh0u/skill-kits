@@ -448,11 +448,10 @@ fn scan_immediate_root(
     let mut instances = Vec::new();
     for entry in fs::read_dir(root.as_std_path())? {
         let entry = entry?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_dir() {
+        let skill_dir = utf8_path(entry.path())?;
+        if !skill_dir.is_dir() {
             continue;
         }
-        let skill_dir = utf8_path(entry.path())?;
         if has_toggle_file(&skill_dir) {
             instances.push(build_instance(
                 skill_dir,
@@ -565,7 +564,7 @@ fn build_instance(
 
 fn hash_agent_skill_dir(skill_dir: &Utf8Path) -> Result<String> {
     let mut files = Vec::new();
-    for entry in WalkDir::new(skill_dir).follow_links(false) {
+    for entry in WalkDir::new(skill_dir).follow_links(true) {
         let entry = entry.map_err(|source| std::io::Error::other(source.to_string()))?;
         if entry.file_type().is_dir() {
             continue;

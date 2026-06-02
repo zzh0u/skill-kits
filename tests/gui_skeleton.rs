@@ -19,8 +19,10 @@ use skill_kits::gui::state::{
     GLOBAL_UNINSTALL_CONFIRMATION_MESSAGE,
 };
 use skill_kits::gui::{
-    agent_actions, project_actions, skill_actions, AgentAction, ProjectAction, SkillAction,
-    SkillKitsGuiApp,
+    agent_actions, inspector_line_presentation, native_options, path_validation_message,
+    project_actions, skill_actions, workbench_cell_style, workbench_row_accepts_keyboard_key,
+    AgentAction, InspectorLineKind, InspectorLinePresentation, PathFieldKind, ProjectAction,
+    SkillAction, SkillKitsGuiApp, WorkbenchCellStyle,
 };
 use tempfile::TempDir;
 
@@ -253,7 +255,21 @@ fn read_only_skill_instances_do_not_offer_toggle_actions() {
     let paths = test_paths(&temp_dir);
     let home = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).unwrap();
     ensure_app_dirs(&paths).unwrap();
-    write_config(&paths, &Config::default()).unwrap();
+    write_config(
+        &paths,
+        &Config {
+            agents: vec![AgentConfig {
+                id: AgentId::new("codex"),
+                label: "Codex".to_string(),
+                kind: AgentKind::BuiltIn,
+                global_skill_dirs: vec!["~/.codex/plugins/cache".into()],
+                project_skill_dirs: vec![".agents/skills".into()],
+                enabled: true,
+            }],
+            ..Config::default()
+        },
+    )
+    .unwrap();
     write_skills_registry(&paths, &SkillsRegistry::default()).unwrap();
     write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
     let skill_dir = home.join(".codex/plugins/cache/openai/browser/skills/browser-skill");
@@ -267,6 +283,45 @@ fn read_only_skill_instances_do_not_offer_toggle_actions() {
     assert_eq!(skill_actions(&model), vec![SkillAction::ScanAgentSpaces]);
     assert_eq!(model.request_disable_selected_skill_instance(), None);
     assert_eq!(model.request_enable_selected_skill_instance(), None);
+}
+
+#[test]
+fn skills_view_default_excludes_plugin_provided_skills_from_native_table() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = test_paths(&temp_dir);
+    let home = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).unwrap();
+    ensure_app_dirs(&paths).unwrap();
+    write_config(&paths, &Config::default()).unwrap();
+    write_skills_registry(&paths, &SkillsRegistry::default()).unwrap();
+    write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
+    write_global_codex_skill(&temp_dir, "native-skill", "# Native Skill\n");
+    write_skill(
+        &home.join(".codex/plugins/cache/openai/browser/skills/browser-skill"),
+        "# Browser Skill\n",
+    );
+    write_skill(
+        &home.join(".codex/vendor_imports/skills/skills/.curated/vendor-skill"),
+        "# Vendor Skill\n",
+    );
+    write_skill(
+        &home.join(".skills-manager/skills/manager-only-skill"),
+        "# Manager Only Skill\n",
+    );
+
+    let mut model = GuiModel::load_with_home_dir(&paths, home).unwrap();
+    model.navigate(NavigationView::Skills);
+    let renderable = model.renderable_view();
+
+    assert_eq!(
+        renderable
+            .main_rows
+            .iter()
+            .map(|row| row.cells[0].as_str())
+            .collect::<Vec<_>>(),
+        vec!["Native Skill"]
+    );
+    assert_eq!(model.dashboard.agent_space_instance_count, 1);
+    assert_eq!(model.dashboard.read_only_count, 0);
 }
 
 #[test]
@@ -382,17 +437,12 @@ fn skills_view_filters_by_status_and_exposes_filter_options() {
     let invalid_dir = home.join(".codex/skills/invalid-skill");
     write_skill(&invalid_dir, "# Enabled side\n");
     std::fs::write(invalid_dir.join("SKILL.md.disabled"), "# Disabled side\n").unwrap();
-    write_skill(
-        &home.join(".codex/plugins/cache/openai/browser/skills/browser-skill"),
-        "# Browser Skill\n",
-    );
-
     let mut model = GuiModel::load_with_home_dir(&paths, home).unwrap();
     model.navigate(NavigationView::Skills);
 
     assert_eq!(
         model.skill_status_filter_options(),
-        vec!["Enabled", "Disabled", "Invalid", "Read-only"]
+        vec!["Enabled", "Disabled", "Invalid"]
     );
 
     model.set_skill_status_filter(Some("Read-only".to_string()));
@@ -404,7 +454,7 @@ fn skills_view_filters_by_status_and_exposes_filter_options() {
             .iter()
             .map(|row| row.cells[0].as_str())
             .collect::<Vec<_>>(),
-        vec!["Browser Skill"]
+        Vec::<&str>::new()
     );
 
     model.set_skill_status_filter(Some("Invalid".to_string()));
@@ -587,7 +637,24 @@ fn skills_inspector_names_invalid_and_read_only_states_explicitly() {
     let paths = test_paths(&temp_dir);
     let home = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).unwrap();
     ensure_app_dirs(&paths).unwrap();
-    write_config(&paths, &Config::default()).unwrap();
+    write_config(
+        &paths,
+        &Config {
+            agents: vec![AgentConfig {
+                id: AgentId::new("codex"),
+                label: "Codex".to_string(),
+                kind: AgentKind::BuiltIn,
+                global_skill_dirs: vec![
+                    "~/.codex/skills".into(),
+                    "~/.codex/plugins/cache".into(),
+                ],
+                project_skill_dirs: vec![".agents/skills".into()],
+                enabled: true,
+            }],
+            ..Config::default()
+        },
+    )
+    .unwrap();
     write_skills_registry(&paths, &SkillsRegistry::default()).unwrap();
     write_deployments_registry(&paths, &DeploymentsRegistry::default()).unwrap();
 
@@ -727,6 +794,110 @@ fn navigation_titles_match_frozen_agent_space_shape() {
         model.navigate(view);
         assert_eq!(model.renderable_view().title, title);
     }
+}
+
+#[test]
+fn native_gui_options_integrate_dark_macos_title_area() {
+    let options = native_options();
+    assert_eq!(options.viewport.inner_size, Some(egui::vec2(1180.0, 760.0)));
+    assert_eq!(
+        options.viewport.min_inner_size,
+        Some(egui::vec2(960.0, 620.0))
+    );
+    assert_eq!(options.viewport.fullsize_content_view, Some(true));
+    assert_eq!(options.viewport.titlebar_shown, Some(false));
+    assert_eq!(options.viewport.title_shown, Some(false));
+    assert_eq!(options.viewport.titlebar_buttons_shown, Some(true));
+    assert_ne!(options.viewport.decorations, Some(false));
+}
+
+#[test]
+fn workbench_cell_styles_mark_statuses_and_paths_for_dense_rows() {
+    assert_eq!(
+        workbench_cell_style("Status"),
+        WorkbenchCellStyle::StatusBadge
+    );
+    assert_eq!(
+        workbench_cell_style("Toggle"),
+        WorkbenchCellStyle::StatusBadge
+    );
+    assert_eq!(
+        workbench_cell_style("Validation"),
+        WorkbenchCellStyle::StatusBadge
+    );
+    assert_eq!(workbench_cell_style("Path"), WorkbenchCellStyle::Mono);
+    assert_eq!(
+        workbench_cell_style("Project skill directories"),
+        WorkbenchCellStyle::Mono
+    );
+    assert_eq!(workbench_cell_style("Skill"), WorkbenchCellStyle::Text);
+}
+
+#[test]
+fn path_validation_contracts_cover_open_project_and_agent_editor_drafts() {
+    let temp_dir = TempDir::new().unwrap();
+    let project = project_path(&temp_dir, "opened-app");
+    std::fs::create_dir_all(&project).unwrap();
+
+    assert_eq!(
+        path_validation_message("", PathFieldKind::ExistingDirectory),
+        Some("Choose a folder.")
+    );
+    assert_eq!(
+        path_validation_message(project.as_str(), PathFieldKind::ExistingDirectory),
+        None
+    );
+    assert_eq!(
+        path_validation_message("/tmp/absolute", PathFieldKind::AgentProjectDir),
+        Some("Use a project-relative directory.")
+    );
+    assert_eq!(
+        path_validation_message(".codex/skills", PathFieldKind::AgentProjectDir),
+        None
+    );
+}
+
+#[test]
+fn inspector_line_presentation_supports_key_values_paths_and_badges() {
+    assert_eq!(
+        inspector_line_presentation("Skill dir /tmp/project/.agents/skills/example"),
+        InspectorLinePresentation {
+            label: "Skill dir".to_string(),
+            value: "/tmp/project/.agents/skills/example".to_string(),
+            kind: InspectorLineKind::Path,
+        }
+    );
+    assert_eq!(
+        inspector_line_presentation("Instance ID codex-example-global"),
+        InspectorLinePresentation {
+            label: "Instance ID".to_string(),
+            value: "codex-example-global".to_string(),
+            kind: InspectorLineKind::Mono,
+        }
+    );
+    assert_eq!(
+        inspector_line_presentation("Status Enabled"),
+        InspectorLinePresentation {
+            label: "Status".to_string(),
+            value: "Enabled".to_string(),
+            kind: InspectorLineKind::StatusBadge,
+        }
+    );
+    assert_eq!(
+        inspector_line_presentation("Scan Agent Spaces refreshes the Skill Instance Index."),
+        InspectorLinePresentation {
+            label: String::new(),
+            value: "Scan Agent Spaces refreshes the Skill Instance Index.".to_string(),
+            kind: InspectorLineKind::Text,
+        }
+    );
+}
+
+#[test]
+fn workbench_rows_activate_with_keyboard_enter_or_space() {
+    assert!(workbench_row_accepts_keyboard_key(egui::Key::Enter));
+    assert!(workbench_row_accepts_keyboard_key(egui::Key::Space));
+    assert!(!workbench_row_accepts_keyboard_key(egui::Key::Escape));
 }
 
 #[test]
@@ -1259,7 +1430,11 @@ fn gui_adopt_all_agent_skills_recursively_imports_codex_skill_libraries() {
                 id: AgentId::new("codex"),
                 label: "Codex".to_string(),
                 kind: AgentKind::BuiltIn,
-                global_skill_dirs: vec![home.join(".codex/skills")],
+                global_skill_dirs: vec![
+                    home.join(".codex/skills"),
+                    home.join(".codex/plugins/cache"),
+                    home.join(".codex/vendor_imports"),
+                ],
                 project_skill_dirs: vec![".agents/skills".into()],
                 enabled: true,
             }],
