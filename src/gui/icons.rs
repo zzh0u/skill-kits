@@ -13,6 +13,7 @@ pub const SCAN: &str = "\u{f021}";
 pub const REFRESH: &str = "\u{f021}";
 pub const BACK: &str = "\u{f060}";
 pub const FORWARD: &str = "\u{f061}";
+pub const CHEVRON_RIGHT: &str = "\u{f054}";
 pub const ENABLE_SKILL: &str = "\u{f144}";
 pub const DISABLE_SKILL: &str = "\u{f28b}";
 pub const ENABLE_PLUGIN: &str = "\u{f205}";

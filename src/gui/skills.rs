@@ -27,10 +27,6 @@ pub fn renderable(model: &GuiModel) -> RenderableView {
                 skill_instance_scope_label(&instance.scope),
                 skill_instance_status_label(instance).to_string(),
                 skill_instance_source_label(model, instance),
-                instance
-                    .updated_at
-                    .clone()
-                    .unwrap_or_else(|| "-".to_string()),
             ],
         })
         .collect();
@@ -44,7 +40,6 @@ pub fn renderable(model: &GuiModel) -> RenderableView {
             "Scope".to_string(),
             "Status".to_string(),
             "Source".to_string(),
-            "Updated".to_string(),
         ],
         main_rows,
         inspector_sections: inspector_sections(model),

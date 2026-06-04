@@ -20,12 +20,15 @@ use skill_kits::gui::state::{
 };
 use skill_kits::gui::{
     agent_actions, dashboard_overview_grid, icons, inspector_line_presentation, native_options,
-    path_validation_message, plugin_actions, project_actions, sidebar_grid_metrics,
-    sidebar_nav_label, skill_actions, status_badge_fill, status_badge_stroke, workbench_cell_style,
-    workbench_chrome_top_inset, workbench_content_grid, workbench_renders_inspector_panel,
-    workbench_row_accepts_keyboard_key, workbench_row_fill, AgentAction, InspectorLineKind,
-    InspectorLinePresentation, PathFieldKind, PluginAction, ProjectAction, SkillAction,
-    SkillKitsGuiApp, WorkbenchCellStyle, SIDEBAR_NAV_ROW_HEIGHT, SIDEBAR_WIDTH,
+    path_validation_message, plugin_actions, plugin_row_disclosure, project_actions,
+    sidebar_grid_metrics, sidebar_nav_label, skill_actions, status_badge_fill, status_badge_stroke,
+    workbench_button_label, workbench_button_metrics, workbench_cell_alignment,
+    workbench_cell_content_offset_x, workbench_cell_style, workbench_chrome_top_inset,
+    workbench_content_grid, workbench_filter_width, workbench_renders_inspector_panel,
+    workbench_row_accepts_keyboard_key, workbench_row_fill, workbench_table_metrics, AgentAction,
+    InspectorLineKind, InspectorLinePresentation, PathFieldKind, PluginAction, ProjectAction,
+    SkillAction, SkillKitsGuiApp, WorkbenchCellAlignment, WorkbenchCellStyle,
+    SIDEBAR_NAV_ROW_HEIGHT, SIDEBAR_WIDTH,
 };
 use tempfile::TempDir;
 
@@ -277,10 +280,11 @@ fn skills_view_renders_agent_space_instances_instead_of_managed_inventory_column
 
     assert_eq!(
         renderable.columns,
-        vec!["Skill", "Agent", "Scope", "Status", "Source", "Updated"]
+        vec!["Skill", "Agent", "Scope", "Status", "Source"]
     );
     assert_eq!(renderable.main_rows.len(), 1);
     let row = &renderable.main_rows[0];
+    assert_eq!(row.cells.len(), 5);
     assert_eq!(row.cells[0], "Agent Visible");
     assert_eq!(row.cells[1], "Codex");
     assert_eq!(row.cells[2], "Global");
@@ -911,7 +915,7 @@ fn plugins_view_lists_packages_as_control_units_and_opens_skill_detail_view() {
 
     assert_eq!(
         renderable.columns,
-        vec!["Plugin", "Provider", "Agent", "Status", "Skills", "Path", "Updated"]
+        vec!["Plugin", "Provider", "Agent", "Status", "Skills", "Path"]
     );
     assert_eq!(
         renderable
@@ -921,6 +925,7 @@ fn plugins_view_lists_packages_as_control_units_and_opens_skill_detail_view() {
             .collect::<Vec<_>>(),
         vec!["GitHub Tools"]
     );
+    assert_eq!(renderable.main_rows[0].cells.len(), 6);
     assert_eq!(renderable.main_rows[0].cells[4], "1 Skill");
 
     let package_row_id = renderable.main_rows[0].id.clone();
@@ -1115,6 +1120,7 @@ fn workbench_grid_polish_helpers_keep_navigation_and_hover_states_stable() {
     let sidebar_grid = sidebar_grid_metrics();
     let content_grid = workbench_content_grid(620.0);
     let dashboard_grid = dashboard_overview_grid(620.0);
+    let button_metrics = workbench_button_metrics();
 
     assert_eq!(SIDEBAR_WIDTH, 244.0);
     assert_eq!(SIDEBAR_NAV_ROW_HEIGHT, 36.0);
@@ -1152,6 +1158,30 @@ fn workbench_grid_polish_helpers_keep_navigation_and_hover_states_stable() {
     assert_eq!(dashboard_grid.row_label_x, content_grid.left);
     assert_eq!(dashboard_grid.divider_end_x, content_grid.right);
     assert_eq!(dashboard_grid.value_width, 132.0);
+    assert_eq!(button_metrics.height, 28.0);
+    assert_eq!(button_metrics.radius, 4.0);
+    assert_eq!(button_metrics.icon_width, 18.0);
+    assert_eq!(button_metrics.horizontal_padding, 9.0);
+    assert_eq!(workbench_filter_width("Agent"), 136.0);
+    assert_eq!(workbench_filter_width("Scope"), 116.0);
+    assert_eq!(workbench_filter_width("Status"), 112.0);
+    assert_eq!(workbench_filter_width("Other"), 120.0);
+    assert_eq!(
+        workbench_button_label(icons::BACK, "Plugins"),
+        icons::button_label(icons::BACK, "Plugins")
+    );
+    assert_eq!(
+        plugin_row_disclosure(NavigationView::Plugins, &["Plugin".to_string()]),
+        Some(icons::CHEVRON_RIGHT)
+    );
+    assert_eq!(
+        plugin_row_disclosure(NavigationView::Plugins, &["Skill".to_string()]),
+        None
+    );
+    assert_eq!(
+        plugin_row_disclosure(NavigationView::Skills, &["Skill".to_string()]),
+        None
+    );
 
     assert_eq!(
         status_badge_fill("Enabled", false, false, colors),
@@ -1171,19 +1201,19 @@ fn workbench_grid_polish_helpers_keep_navigation_and_hover_states_stable() {
     );
     assert_eq!(
         status_badge_fill("Read-only", true, true, colors),
-        colors.surface_1
+        egui::Color32::TRANSPARENT
     );
     assert_eq!(
         status_badge_stroke("Enabled", false, false, colors),
-        egui::Stroke::new(1.0, colors.hairline)
+        egui::Stroke::NONE
     );
     assert_eq!(
         status_badge_stroke("Enabled", true, false, colors),
-        egui::Stroke::new(1.0, colors.hairline_strong)
+        egui::Stroke::NONE
     );
     assert_eq!(
         status_badge_stroke("Read-only", true, true, colors),
-        egui::Stroke::new(1.0, colors.hairline_strong)
+        egui::Stroke::NONE
     );
 }
 
@@ -1236,7 +1266,42 @@ fn workbench_cell_styles_mark_statuses_and_paths_for_dense_rows() {
         workbench_cell_style("Project skill directories"),
         WorkbenchCellStyle::Mono
     );
+    assert_eq!(workbench_cell_style("Source"), WorkbenchCellStyle::Text);
     assert_eq!(workbench_cell_style("Skill"), WorkbenchCellStyle::Text);
+    for column in ["Skill", "Agent", "Scope", "Status", "Source"] {
+        assert_eq!(
+            workbench_cell_alignment(column),
+            WorkbenchCellAlignment::Center
+        );
+    }
+    assert_eq!(workbench_cell_content_offset_x("Status"), 8.0);
+    assert_eq!(workbench_cell_content_offset_x("Enabled"), 8.0);
+    assert_eq!(workbench_cell_content_offset_x("Validation"), 8.0);
+    assert_eq!(workbench_cell_content_offset_x("Source"), 0.0);
+    assert_eq!(workbench_cell_content_offset_x("Skill"), 0.0);
+}
+
+#[test]
+fn skills_table_metrics_align_status_and_source_columns() {
+    let columns = vec![
+        "Skill".to_string(),
+        "Agent".to_string(),
+        "Scope".to_string(),
+        "Status".to_string(),
+        "Source".to_string(),
+    ];
+
+    let metrics = workbench_table_metrics(&columns, 620.0);
+
+    assert_eq!(metrics.inset, 12.0);
+    assert_eq!(metrics.column_gap, 8.0);
+    assert_eq!(
+        metrics.column_widths,
+        vec![156.0, 156.0, 144.0, 112.0, 144.0]
+    );
+    assert_eq!(metrics.column_lefts, vec![12.0, 176.0, 340.0, 492.0, 612.0]);
+    assert_eq!(metrics.content_width, 744.0);
+    assert_eq!(metrics.table_width, 768.0);
 }
 
 #[test]

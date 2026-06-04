@@ -126,6 +126,22 @@ When hovering a Skill row:
 - selected row gets `surface_3`
 - only the selected row should look persistent
 
+### 6. Workbench Component Motion
+
+Use egui `Ui` allocation and `Context` animation APIs to make controls feel native to the workbench instead of default egui widgets.
+
+Rules:
+
+- sidebar primary tabs and scope rows use the same hover alpha animation as table rows
+- action buttons use one compact workbench button component instead of mixed default buttons
+- button height is stable, icon and label are aligned, and destructive actions use text/stroke emphasis instead of a loud fill
+- disabled buttons keep their footprint and use muted text
+- filter controls use fixed-width compact ComboBox widgets with stable labels and spacing
+- plugin package rows show a right-side disclosure affordance so the secondary Skill view reads as a drill-in interaction
+- secondary plugin view keeps the Back action visually compact and icon-led
+
+This polish should keep motion purposeful: hover and focus feedback only. No page-load animation, decorative transitions, or layout animation.
+
 ## Implementation Notes
 
 Likely files:
@@ -142,6 +158,9 @@ Suggested extraction:
 - `render_sidebar_scope_item(...)`
 - `render_dashboard_section(...)`
 - `workbench_content_grid(...)`
+- `workbench_button_metrics(...)`
+- `workbench_filter_width(...)`
+- `plugin_row_disclosure(...)`
 - `row_fill(selected, hovered, colors)`
 - `status_badge_surface(value, row_hovered, selected, colors)`
 
@@ -155,6 +174,9 @@ Add or update tests for pure helper behavior where possible:
 - hover/selected fill precedence is selected over hovered
 - `Read-only` status maps to read-only icon and quiet status category
 - main content helper returns one shared inset and right edge for heading, divider, table header, table rows, and Dashboard rows
+- workbench button helper returns stable height/radius/padding metrics
+- Skill filters return stable widths by filter kind
+- plugin package rows expose a disclosure affordance while plugin Skill detail rows do not
 - Dashboard section helper preserves stable section ordering if represented in renderable data
 
 Manual verification:
@@ -174,5 +196,9 @@ Manual verification:
 - Skill row hover no longer makes unrelated left/right areas look active.
 - Read-only default state is quieter than hover.
 - Hover color is consistent across Skill rows.
+- Sidebar hover fades in consistently with main workbench rows.
+- Action controls use one compact button vocabulary across Skills, Projects, Agents, and Plugins.
+- Skill filters keep fixed widths and aligned labels.
+- Plugin package rows include a visible disclosure cue for the secondary Skill list.
 - No business logic or CLI behavior changes.
 - `cargo fmt --check` and `cargo test` pass.

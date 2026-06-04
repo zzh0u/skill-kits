@@ -21,6 +21,7 @@ use std::thread;
 
 const MAIN_ROW_HEIGHT: f32 = 34.0;
 const MAIN_CONTENT_INSET: f32 = 12.0;
+const TABLE_COLUMN_GAP: f32 = 8.0;
 const DASHBOARD_VALUE_WIDTH: f32 = 132.0;
 pub const SIDEBAR_WIDTH: f32 = 244.0;
 pub const SIDEBAR_NAV_ROW_HEIGHT: f32 = 36.0;
@@ -57,6 +58,24 @@ pub struct WorkbenchContentGrid {
     pub right: f32,
     pub width: f32,
     pub row_rounding: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorkbenchButtonMetrics {
+    pub height: f32,
+    pub radius: f32,
+    pub icon_width: f32,
+    pub horizontal_padding: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkbenchTableMetrics {
+    pub inset: f32,
+    pub column_gap: f32,
+    pub column_widths: Vec<f32>,
+    pub column_lefts: Vec<f32>,
+    pub content_width: f32,
+    pub table_width: f32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +122,11 @@ pub enum WorkbenchCellStyle {
     Text,
     Mono,
     StatusBadge,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkbenchCellAlignment {
+    Center,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -249,8 +273,8 @@ pub fn plugin_actions(model: &GuiModel) -> Vec<PluginAction> {
 
 pub fn workbench_cell_style(column: &str) -> WorkbenchCellStyle {
     match column {
-        "Status" | "Toggle" | "Validation" | "Enabled" | "Writable" | "Managed" | "Source"
-        | "Outdated" | "Drift" | "Risk" | "Read-only" => WorkbenchCellStyle::StatusBadge,
+        "Status" | "Toggle" | "Validation" | "Enabled" | "Writable" | "Managed" | "Outdated"
+        | "Drift" | "Risk" | "Read-only" => WorkbenchCellStyle::StatusBadge,
         "Path"
         | "Project skill directories"
         | "Skill ID"
@@ -261,6 +285,17 @@ pub fn workbench_cell_style(column: &str) -> WorkbenchCellStyle {
         | "Hash"
         | "Command" => WorkbenchCellStyle::Mono,
         _ => WorkbenchCellStyle::Text,
+    }
+}
+
+pub fn workbench_cell_alignment(_column: &str) -> WorkbenchCellAlignment {
+    WorkbenchCellAlignment::Center
+}
+
+pub fn workbench_cell_content_offset_x(column: &str) -> f32 {
+    match column {
+        "Status" | "Enabled" | "Validation" => 8.0,
+        _ => 0.0,
     }
 }
 
@@ -321,6 +356,63 @@ pub fn workbench_content_grid(available_width: f32) -> WorkbenchContentGrid {
     }
 }
 
+pub fn workbench_button_metrics() -> WorkbenchButtonMetrics {
+    WorkbenchButtonMetrics {
+        height: 28.0,
+        radius: 4.0,
+        icon_width: 18.0,
+        horizontal_padding: 9.0,
+    }
+}
+
+pub fn workbench_button_label(icon: &str, label: &str) -> String {
+    icons::button_label(icon, label)
+}
+
+pub fn workbench_filter_width(label: &str) -> f32 {
+    match label {
+        "Agent" => 136.0,
+        "Scope" => 116.0,
+        "Status" => 112.0,
+        _ => 120.0,
+    }
+}
+
+pub fn plugin_row_disclosure(view: NavigationView, columns: &[String]) -> Option<&'static str> {
+    if !matches!(view, NavigationView::Plugins) {
+        return None;
+    }
+    columns
+        .first()
+        .is_some_and(|column| column == "Plugin")
+        .then_some(icons::CHEVRON_RIGHT)
+}
+
+pub fn workbench_table_metrics(columns: &[String], viewport_width: f32) -> WorkbenchTableMetrics {
+    let column_widths = table_column_widths(columns);
+    let content_width = column_widths.iter().sum::<f32>()
+        + TABLE_COLUMN_GAP * column_widths.len().saturating_sub(1) as f32;
+    let table_width = (content_width + (MAIN_CONTENT_INSET * 2.0)).max(viewport_width);
+    let mut cursor = MAIN_CONTENT_INSET;
+    let column_lefts = column_widths
+        .iter()
+        .map(|width| {
+            let left = cursor;
+            cursor += *width + TABLE_COLUMN_GAP;
+            left
+        })
+        .collect();
+
+    WorkbenchTableMetrics {
+        inset: MAIN_CONTENT_INSET,
+        column_gap: TABLE_COLUMN_GAP,
+        column_widths,
+        column_lefts,
+        content_width,
+        table_width,
+    }
+}
+
 pub fn workbench_row_fill(selected: bool, hovered: bool, colors: UiColors) -> egui::Color32 {
     if selected {
         colors.surface_3
@@ -337,11 +429,10 @@ pub fn status_badge_fill(
     selected: bool,
     colors: UiColors,
 ) -> egui::Color32 {
-    if selected {
-        return colors.surface_1;
-    }
     let _ = value;
     let _ = row_hovered;
+    let _ = selected;
+    let _ = colors;
     egui::Color32::TRANSPARENT
 }
 
@@ -351,11 +442,10 @@ pub fn status_badge_stroke(
     selected: bool,
     colors: UiColors,
 ) -> egui::Stroke {
-    if selected || row_hovered {
-        egui::Stroke::new(1.0, colors.hairline_strong)
-    } else {
-        egui::Stroke::new(1.0, colors.hairline)
-    }
+    let _ = row_hovered;
+    let _ = selected;
+    let _ = colors;
+    egui::Stroke::NONE
 }
 
 pub fn path_validation_message(value: &str, kind: PathFieldKind) -> Option<&'static str> {
@@ -779,11 +869,19 @@ fn render_sidebar_grid_item(
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::click());
     let fill = workbench_row_fill(selected, response.hovered(), colors);
+    let hover_alpha = if selected {
+        1.0
+    } else {
+        ui.ctx().animate_bool_responsive(
+            ui.id().with(("sidebar_row_hover", label)),
+            response.hovered(),
+        )
+    };
     if fill != egui::Color32::TRANSPARENT {
         ui.painter().rect_filled(
             rect.shrink2(egui::vec2(grid.row_outer_inset, 2.0)),
             egui::Rounding::same(grid.row_radius),
-            fill,
+            fade_color(fill, hover_alpha),
         );
     }
     if response.has_focus() {
@@ -962,41 +1060,53 @@ fn render_workbench_table(
         .id_salt(format!("main_table_horizontal_{:?}", renderable.view))
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let widths = table_column_widths(&renderable.columns);
             let viewport_width = ui.available_width();
-            let content_grid = workbench_content_grid(viewport_width);
-            let table_width: f32 =
-                (widths.iter().sum::<f32>() + (content_grid.inset * 2.0)).max(viewport_width);
-            render_table_header(ui, &renderable.columns, &widths, colors);
-            render_inset_divider_with_width(ui, table_width, colors);
+            let metrics = workbench_table_metrics(&renderable.columns, viewport_width);
+            render_table_header(ui, &renderable.columns, &metrics, colors);
+            render_inset_divider_with_width(ui, metrics.table_width, colors);
             egui::ScrollArea::vertical()
                 .id_salt(format!("main_table_vertical_{:?}", renderable.view))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     for row in &renderable.main_rows {
-                        render_table_row(ui, model, renderable, row, &widths, table_width, colors);
+                        render_table_row(ui, model, renderable, row, &metrics, colors);
                     }
                 });
         });
 }
 
-fn render_table_header(ui: &mut egui::Ui, columns: &[String], widths: &[f32], colors: UiColors) {
-    let grid = workbench_content_grid(ui.available_width());
-    ui.horizontal(|ui| {
-        ui.add_space(grid.left);
-        for (column, width) in columns.iter().zip(widths.iter()) {
-            ui.add_sized(
-                [*width, 22.0],
-                egui::Label::new(
-                    egui::RichText::new(column)
-                        .color(colors.ink_subtle)
-                        .strong(),
-                )
-                .truncate(),
+fn render_table_header(
+    ui: &mut egui::Ui,
+    columns: &[String],
+    metrics: &WorkbenchTableMetrics,
+    colors: UiColors,
+) {
+    let header_height = 22.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(metrics.table_width, header_height),
+        egui::Sense::hover(),
+    );
+    for ((column, left), width) in columns
+        .iter()
+        .zip(metrics.column_lefts.iter())
+        .zip(metrics.column_widths.iter())
+    {
+        let cell_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + *left, rect.top()),
+            egui::vec2(*width, header_height),
+        );
+        let response = ui.put(
+            cell_rect,
+            egui::Label::new(
+                egui::RichText::new(column)
+                    .color(colors.ink_subtle)
+                    .strong(),
             )
-            .on_hover_text(column);
-        }
-    });
+            .halign(cell_halign(column))
+            .truncate(),
+        );
+        response.on_hover_text(column);
+    }
 }
 
 fn render_table_row(
@@ -1004,14 +1114,13 @@ fn render_table_row(
     model: &mut GuiModel,
     renderable: &RenderableView,
     row: &RenderRow,
-    widths: &[f32],
-    table_width: f32,
+    metrics: &WorkbenchTableMetrics,
     colors: UiColors,
 ) {
     let selected = is_render_row_selected(model, renderable.view, &row.id);
-    let grid = workbench_content_grid(table_width);
+    let grid = workbench_content_grid(metrics.table_width);
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(table_width, MAIN_ROW_HEIGHT),
+        egui::vec2(metrics.table_width, MAIN_ROW_HEIGHT),
         egui::Sense::click(),
     );
     let hovered = response.hovered() || response.has_focus();
@@ -1039,18 +1148,32 @@ fn render_table_row(
         );
     }
 
-    let mut row_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect.shrink2(egui::vec2(grid.inset, 0.0)))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    for ((cell, column), width) in row
+    for (((cell, column), left), width) in row
         .cells
         .iter()
         .zip(renderable.columns.iter())
-        .zip(widths.iter())
+        .zip(metrics.column_lefts.iter())
+        .zip(metrics.column_widths.iter())
     {
-        render_table_cell(&mut row_ui, cell, column, *width, selected, hovered, colors);
+        let cell_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + *left, rect.top()),
+            egui::vec2(*width, MAIN_ROW_HEIGHT),
+        )
+        .translate(egui::vec2(workbench_cell_content_offset_x(column), 0.0));
+        render_table_cell(ui, cell_rect, cell, column, selected, hovered, colors);
+    }
+    if let Some(disclosure) = plugin_row_disclosure(renderable.view, &renderable.columns) {
+        ui.painter().text(
+            egui::pos2(rect.right() - grid.inset - 12.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            disclosure,
+            egui::FontId::proportional(12.0),
+            if selected {
+                colors.ink_muted
+            } else {
+                colors.ink_tertiary
+            },
+        );
     }
 
     let keyboard_activated = response.has_focus()
@@ -1068,43 +1191,59 @@ fn render_table_row(
 
 fn render_table_cell(
     ui: &mut egui::Ui,
+    cell_rect: egui::Rect,
     cell: &str,
     column: &str,
-    width: f32,
     selected: bool,
     row_hovered: bool,
     colors: UiColors,
 ) {
     match workbench_cell_style(column) {
         WorkbenchCellStyle::StatusBadge => {
-            ui.allocate_ui_with_layout(
-                egui::vec2(width, MAIN_ROW_HEIGHT),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    render_status_badge(ui, cell, row_hovered, selected, colors)
-                        .on_hover_text(cell);
-                },
+            let mut cell_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(cell_rect)
+                    .layout(cell_layout(column)),
             );
+            render_status_badge(&mut cell_ui, cell, row_hovered, selected, colors)
+                .on_hover_text(cell);
         }
         WorkbenchCellStyle::Mono => {
-            let response = ui.add_sized(
-                [width, MAIN_ROW_HEIGHT],
+            let response = ui.put(
+                cell_rect,
                 egui::Label::new(
                     egui::RichText::new(cell)
                         .monospace()
                         .size(12.0)
                         .color(colors.ink_subtle),
                 )
+                .halign(cell_halign(column))
                 .truncate(),
             );
             response.on_hover_text(cell);
         }
         WorkbenchCellStyle::Text => {
-            let response = ui.add_sized(
-                [width, MAIN_ROW_HEIGHT],
-                egui::Label::new(egui::RichText::new(cell).color(colors.ink_muted)).truncate(),
+            let response = ui.put(
+                cell_rect,
+                egui::Label::new(egui::RichText::new(cell).color(colors.ink_muted))
+                    .halign(cell_halign(column))
+                    .truncate(),
             );
             response.on_hover_text(cell);
+        }
+    }
+}
+
+fn cell_halign(column: &str) -> egui::Align {
+    match workbench_cell_alignment(column) {
+        WorkbenchCellAlignment::Center => egui::Align::Center,
+    }
+}
+
+fn cell_layout(column: &str) -> egui::Layout {
+    match workbench_cell_alignment(column) {
+        WorkbenchCellAlignment::Center => {
+            egui::Layout::centered_and_justified(egui::Direction::TopDown)
         }
     }
 }
@@ -1141,6 +1280,53 @@ fn fade_color(color: egui::Color32, factor: f32) -> egui::Color32 {
     }
     let alpha = (255.0 * factor.clamp(0.0, 1.0)).round() as u8;
     egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+fn render_workbench_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    colors: UiColors,
+    danger: bool,
+    enabled: bool,
+) -> egui::Response {
+    let metrics = workbench_button_metrics();
+    let text = workbench_button_label(icon, label);
+    let width = (metrics.horizontal_padding * 2.0)
+        + metrics.icon_width
+        + ((label.chars().count() as f32) * 7.0)
+        + 6.0;
+    let text_color = if !enabled {
+        colors.ink_tertiary
+    } else if danger {
+        colors.danger
+    } else {
+        colors.ink_muted
+    };
+    let stroke_color = if !enabled {
+        colors.hairline
+    } else if danger {
+        colors.danger
+    } else {
+        colors.hairline
+    };
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new(egui::RichText::new(text).size(13.0).color(text_color))
+            .min_size(egui::vec2(width.max(44.0), metrics.height))
+            .fill(egui::Color32::TRANSPARENT)
+            .stroke(egui::Stroke::new(1.0, stroke_color))
+            .rounding(egui::Rounding::same(metrics.radius)),
+    );
+
+    if enabled && response.hovered() && !danger {
+        ui.painter().rect_stroke(
+            response.rect.shrink(1.0),
+            egui::Rounding::same(metrics.radius),
+            egui::Stroke::new(1.0, colors.hairline_strong),
+        );
+    }
+    response
 }
 
 fn status_color(value: &str, colors: UiColors) -> egui::Color32 {
@@ -1212,6 +1398,7 @@ fn render_skill_filters(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColor
             })
             .unwrap_or_else(|| "All".to_string());
         egui::ComboBox::from_id_salt("skill_agent_filter")
+            .width(workbench_filter_width("Agent"))
             .selected_text(agent_text)
             .show_ui(ui, |ui| {
                 if ui
@@ -1236,6 +1423,7 @@ fn render_skill_filters(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColor
         ui.label(egui::RichText::new("Scope").color(colors.ink_subtle));
         let scope_text = model.skill_scope_filter().unwrap_or("All").to_string();
         egui::ComboBox::from_id_salt("skill_scope_filter")
+            .width(workbench_filter_width("Scope"))
             .selected_text(scope_text)
             .show_ui(ui, |ui| {
                 if ui
@@ -1260,6 +1448,7 @@ fn render_skill_filters(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColor
         ui.label(egui::RichText::new("Status").color(colors.ink_subtle));
         let status_text = model.skill_status_filter().unwrap_or("All").to_string();
         egui::ComboBox::from_id_salt("skill_status_filter")
+            .width(workbench_filter_width("Status"))
             .selected_text(status_text)
             .show_ui(ui, |ui| {
                 if ui
@@ -1323,34 +1512,21 @@ fn render_project_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCo
             colors,
         );
         model.update_open_project_path(path_text);
-        if ui
-            .button(icons::button_label(icons::BROWSE, "Open"))
-            .clicked()
-        {
+        if render_workbench_button(ui, icons::BROWSE, "Open", colors, false, true).clicked() {
             let _ = model.request_save_open_project();
         }
-        if ui
-            .button(icons::button_label(icons::CANCEL, "Cancel"))
-            .clicked()
-        {
+        if render_workbench_button(ui, icons::CANCEL, "Cancel", colors, false, true).clicked() {
             model.cancel_open_project();
         }
         return;
     }
 
-    if ui
-        .button(icons::button_label(icons::BROWSE, "Open project"))
-        .clicked()
-    {
+    if render_workbench_button(ui, icons::BROWSE, "Open project", colors, false, true).clicked() {
         model.begin_open_project();
     }
     if model.pending_remove_confirmation().is_some() {
         ui.label(egui::RichText::new(DRIFT_REMOVE_CONFIRMATION_MESSAGE).color(colors.warning));
-        if ui
-            .button(
-                egui::RichText::new(icons::button_label(icons::REMOVE, "Confirm Remove"))
-                    .color(colors.danger),
-            )
+        if render_workbench_button(ui, icons::REMOVE, "Confirm Remove", colors, true, true)
             .clicked()
         {
             let _ = model.confirm_pending_remove();
@@ -1364,10 +1540,17 @@ fn render_project_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCo
 fn render_plugin_action_button(
     ui: &mut egui::Ui,
     model: &mut GuiModel,
-    _colors: UiColors,
+    colors: UiColors,
     action: PluginAction,
 ) {
-    if !ui.button(action.label()).clicked() {
+    let (icon, label) = match action {
+        PluginAction::BackToPlugins => (icons::BACK, "Plugins"),
+        PluginAction::ScanPlugins => (icons::SCAN, action.label()),
+        PluginAction::Enable => (icons::ENABLE_PLUGIN, action.label()),
+        PluginAction::Disable => (icons::DISABLE_PLUGIN, action.label()),
+    };
+    let danger = matches!(action, PluginAction::Disable);
+    if !render_workbench_button(ui, icon, label, colors, danger, true).clicked() {
         return;
     }
 
@@ -1398,11 +1581,18 @@ fn render_plugin_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCol
 fn render_skill_action_button(
     ui: &mut egui::Ui,
     model: &mut GuiModel,
-    _colors: UiColors,
+    colors: UiColors,
     action: SkillAction,
 ) {
-    let label = icons::button_label(icons::skill_action_icon(action), action.label());
-    let clicked = ui.button(label).clicked();
+    let clicked = render_workbench_button(
+        ui,
+        icons::skill_action_icon(action),
+        action.label(),
+        colors,
+        matches!(action, SkillAction::Disable),
+        true,
+    )
+    .clicked();
 
     if !clicked {
         return;
@@ -1429,12 +1619,15 @@ fn render_skill_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColo
         ui.label(
             egui::RichText::new(SKILL_INSTANCE_DISABLE_CONFIRMATION_MESSAGE).color(colors.warning),
         );
-        if ui
-            .button(
-                egui::RichText::new(icons::button_label(icons::DISABLE_SKILL, "Confirm Disable"))
-                    .color(colors.danger),
-            )
-            .clicked()
+        if render_workbench_button(
+            ui,
+            icons::DISABLE_SKILL,
+            "Confirm Disable",
+            colors,
+            true,
+            true,
+        )
+        .clicked()
         {
             let _ = model.confirm_pending_disable_skill_instance();
         }
@@ -1454,13 +1647,15 @@ fn render_agent_action_button(
     colors: UiColors,
     action: AgentAction,
 ) {
-    let label = icons::button_label(icons::agent_action_icon(action), action.label());
-    let clicked = if matches!(action, AgentAction::RemoveCustom) {
-        ui.button(egui::RichText::new(label).color(colors.danger))
-            .clicked()
-    } else {
-        ui.button(label).clicked()
-    };
+    let clicked = render_workbench_button(
+        ui,
+        icons::agent_action_icon(action),
+        action.label(),
+        colors,
+        matches!(action, AgentAction::RemoveCustom),
+        true,
+    )
+    .clicked();
     if !clicked {
         return;
     }
@@ -1505,16 +1700,10 @@ fn render_agent_editor_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors:
         model.update_agent_editor_project_dir(project_dir_text);
 
         ui.horizontal(|ui| {
-            if ui
-                .button(icons::button_label(icons::SAVE, "Save"))
-                .clicked()
-            {
+            if render_workbench_button(ui, icons::SAVE, "Save", colors, false, true).clicked() {
                 let _ = model.request_save_agent_editor();
             }
-            if ui
-                .button(icons::button_label(icons::CANCEL, "Cancel"))
-                .clicked()
-            {
+            if render_workbench_button(ui, icons::CANCEL, "Cancel", colors, false, true).clicked() {
                 model.cancel_agent_editor();
             }
         });
@@ -1542,8 +1731,7 @@ fn render_path_field(
                 .font(egui::TextStyle::Monospace)
                 .desired_width(190.0),
         );
-        if ui
-            .button(icons::button_label(icons::BROWSE, "Browse"))
+        if render_workbench_button(ui, icons::BROWSE, "Browse", colors, false, true)
             .on_hover_text("Choose a folder")
             .clicked()
         {
@@ -1552,23 +1740,22 @@ fn render_path_field(
             }
         }
         let can_reveal = path_exists(value);
-        if ui
-            .add_enabled(
-                can_reveal,
-                egui::Button::new(icons::button_label(icons::REVEAL, "Reveal")),
-            )
+        if render_workbench_button(ui, icons::REVEAL, "Reveal", colors, false, can_reveal)
             .on_hover_text("Reveal in Finder")
             .clicked()
         {
             reveal_path(value);
         }
-        if ui
-            .add_enabled(
-                !value.trim().is_empty(),
-                egui::Button::new(icons::button_label(icons::COPY, "Copy")),
-            )
-            .on_hover_text("Copy path")
-            .clicked()
+        if render_workbench_button(
+            ui,
+            icons::COPY,
+            "Copy",
+            colors,
+            false,
+            !value.trim().is_empty(),
+        )
+        .on_hover_text("Copy path")
+        .clicked()
         {
             ui.output_mut(|output| output.copied_text = value.trim().to_string());
         }
@@ -1639,13 +1826,15 @@ fn render_project_action_button(
     colors: UiColors,
     action: ProjectAction,
 ) {
-    let label = icons::button_label(icons::project_action_icon(action), action.label());
-    let clicked = if matches!(action, ProjectAction::Remove) {
-        ui.button(egui::RichText::new(label).color(colors.danger))
-            .clicked()
-    } else {
-        ui.button(label).clicked()
-    };
+    let clicked = render_workbench_button(
+        ui,
+        icons::project_action_icon(action),
+        action.label(),
+        colors,
+        matches!(action, ProjectAction::Remove),
+        true,
+    )
+    .clicked();
 
     if !clicked {
         return;

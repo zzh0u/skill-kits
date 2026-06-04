@@ -30,7 +30,6 @@ pub fn renderable(model: &GuiModel) -> RenderableView {
             "Status".to_string(),
             "Skills".to_string(),
             "Path".to_string(),
-            "Updated".to_string(),
         ],
         main_rows,
         inspector_sections: inspector_sections(model),
@@ -75,7 +74,6 @@ fn plugin_cells(plugin: &PluginPackage) -> Vec<String> {
         status_label(&plugin.status).to_string(),
         plugin_skill_summary(plugin),
         plugin.package_path.to_string(),
-        plugin.updated_at.clone().unwrap_or_else(|| "-".to_string()),
     ]
 }
 
