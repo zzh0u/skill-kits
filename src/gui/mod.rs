@@ -72,6 +72,15 @@ pub struct WorkbenchButtonMetrics {
     pub horizontal_padding: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorkbenchCommandRowMetrics {
+    pub height: f32,
+    pub radius: f32,
+    pub inset: f32,
+    pub icon_x: f32,
+    pub label_x: f32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkbenchTableMetrics {
     pub inset: f32,
@@ -206,6 +215,14 @@ impl PluginAction {
             Self::Enable => "Enable Plugin",
             Self::Disable => "Disable Plugin",
         }
+    }
+}
+
+pub fn skill_action_command_label(action: SkillAction, confirming_disable: bool) -> &'static str {
+    if matches!(action, SkillAction::Disable) && confirming_disable {
+        "Confirm Disable"
+    } else {
+        action.label()
     }
 }
 
@@ -378,8 +395,22 @@ pub fn workbench_button_metrics() -> WorkbenchButtonMetrics {
     }
 }
 
+pub fn workbench_command_row_metrics() -> WorkbenchCommandRowMetrics {
+    WorkbenchCommandRowMetrics {
+        height: SIDEBAR_SCOPE_ROW_HEIGHT,
+        radius: workbench_content_grid(620.0).row_rounding,
+        inset: MAIN_CONTENT_INSET,
+        icon_x: 10.0,
+        label_x: 36.0,
+    }
+}
+
 pub fn workbench_button_label(icon: &str, label: &str) -> String {
     icons::button_label(icon, label)
+}
+
+pub fn workbench_static_labels_selectable() -> bool {
+    false
 }
 
 pub fn workbench_filter_width(label: &str) -> f32 {
@@ -467,7 +498,7 @@ pub fn workbench_row_fill(selected: bool, hovered: bool, colors: UiColors) -> eg
     if selected {
         colors.surface_3
     } else if hovered {
-        egui::Color32::from_rgb(0x14, 0x14, 0x14)
+        colors.surface_2
     } else {
         egui::Color32::TRANSPARENT
     }
@@ -826,7 +857,10 @@ fn apply_dark_theme(ctx: &egui::Context, colors: UiColors) {
     visuals.widgets.hovered.fg_stroke.color = colors.ink;
     visuals.widgets.active.fg_stroke.color = colors.ink;
     visuals.hyperlink_color = colors.ink_muted;
-    ctx.set_visuals(visuals);
+    let mut style = (*ctx.style()).clone();
+    style.visuals = visuals;
+    style.interaction.selectable_labels = workbench_static_labels_selectable();
+    ctx.set_style(style);
 }
 
 fn render_sidebar_nav_item(
@@ -1333,6 +1367,84 @@ fn render_workbench_button(
     response
 }
 
+fn render_command_row(
+    ui: &mut egui::Ui,
+    id_source: impl std::hash::Hash,
+    icon: &str,
+    label: &str,
+    colors: UiColors,
+    danger: bool,
+    enabled: bool,
+) -> egui::Response {
+    let grid = workbench_content_grid(ui.available_width());
+    let metrics = workbench_command_row_metrics();
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), metrics.height), sense);
+    let row_rect = rect
+        .shrink2(egui::vec2(grid.inset, 1.0))
+        .translate(egui::vec2(0.0, 0.0));
+    let hovered = enabled && (response.hovered() || response.has_focus());
+    let hover_alpha = ui
+        .ctx()
+        .animate_bool_responsive(ui.id().with(("command_row_hover", id_source)), hovered);
+    let fill = workbench_row_fill(false, hovered, colors);
+    if fill != egui::Color32::TRANSPARENT {
+        ui.painter().rect_filled(
+            row_rect,
+            egui::Rounding::same(metrics.radius),
+            fade_color(fill, hover_alpha),
+        );
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            row_rect.shrink(1.0),
+            egui::Rounding::same(metrics.radius),
+            egui::Stroke::new(1.0, colors.focus),
+        );
+    }
+
+    let text_color = if !enabled {
+        colors.ink_tertiary
+    } else if danger {
+        colors.danger
+    } else {
+        colors.ink_muted
+    };
+    ui.painter().text(
+        egui::pos2(row_rect.left() + metrics.icon_x, row_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        egui::FontId::proportional(13.0),
+        text_color,
+    );
+    ui.painter().text(
+        egui::pos2(row_rect.left() + metrics.label_x, row_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.0),
+        text_color,
+    );
+
+    response.on_hover_text(label)
+}
+
+fn render_confirmation_message(ui: &mut egui::Ui, message: &str, colors: UiColors) {
+    let grid = workbench_content_grid(ui.available_width());
+    ui.horizontal(|ui| {
+        ui.add_space(grid.left + workbench_command_row_metrics().label_x);
+        ui.label(
+            egui::RichText::new(message)
+                .color(colors.warning)
+                .size(12.0),
+        );
+    });
+}
+
 fn status_color(value: &str, colors: UiColors) -> egui::Color32 {
     match value {
         "Enabled" | "Ready" | "Yes" => colors.success,
@@ -1479,29 +1591,30 @@ fn render_action_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCol
     }
 
     let grid = workbench_content_grid(ui.available_width());
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         ui.add_space(grid.left);
         ui.label(
             egui::RichText::new("Actions")
                 .color(colors.ink_subtle)
                 .size(12.0),
         );
-        match model.active_view {
-            NavigationView::Skills => {
-                render_skill_controls(ui, model, colors);
-            }
-            NavigationView::Projects => {
-                render_project_controls(ui, model, colors);
-            }
-            NavigationView::Agents => {
-                render_agent_editor_controls(ui, model, colors);
-            }
-            NavigationView::Plugins => {
-                render_plugin_controls(ui, model, colors);
-            }
-            NavigationView::Dashboard => {}
-        }
     });
+    ui.add_space(4.0);
+    match model.active_view {
+        NavigationView::Skills => {
+            render_skill_controls(ui, model, colors);
+        }
+        NavigationView::Projects => {
+            render_project_controls(ui, model, colors);
+        }
+        NavigationView::Agents => {
+            render_agent_editor_controls(ui, model, colors);
+        }
+        NavigationView::Plugins => {
+            render_plugin_controls(ui, model, colors);
+        }
+        NavigationView::Dashboard => {}
+    }
     ui.add_space(8.0);
 }
 
@@ -1516,22 +1629,60 @@ fn render_project_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiCo
             colors,
         );
         model.update_open_project_path(path_text);
-        if render_workbench_button(ui, icons::BROWSE, "Open", colors, false, true).clicked() {
+        if render_command_row(
+            ui,
+            "project_open",
+            icons::BROWSE,
+            "Open",
+            colors,
+            false,
+            true,
+        )
+        .clicked()
+        {
             let _ = model.request_save_open_project();
         }
-        if render_workbench_button(ui, icons::CANCEL, "Cancel", colors, false, true).clicked() {
+        if render_command_row(
+            ui,
+            "project_open_cancel",
+            icons::CANCEL,
+            "Cancel",
+            colors,
+            false,
+            true,
+        )
+        .clicked()
+        {
             model.cancel_open_project();
         }
         return;
     }
 
-    if render_workbench_button(ui, icons::BROWSE, "Open project", colors, false, true).clicked() {
+    if render_command_row(
+        ui,
+        "project_open_project",
+        icons::BROWSE,
+        "Open project",
+        colors,
+        false,
+        true,
+    )
+    .clicked()
+    {
         model.begin_open_project();
     }
     if model.pending_remove_confirmation().is_some() {
-        ui.label(egui::RichText::new(DRIFT_REMOVE_CONFIRMATION_MESSAGE).color(colors.warning));
-        if render_workbench_button(ui, icons::REMOVE, "Confirm Remove", colors, true, true)
-            .clicked()
+        render_confirmation_message(ui, DRIFT_REMOVE_CONFIRMATION_MESSAGE, colors);
+        if render_command_row(
+            ui,
+            "project_confirm_remove",
+            icons::REMOVE,
+            "Confirm Remove",
+            colors,
+            true,
+            true,
+        )
+        .clicked()
         {
             let _ = model.confirm_pending_remove();
         }
@@ -1554,7 +1705,17 @@ fn render_plugin_action_button(
         PluginAction::Disable => (icons::DISABLE_PLUGIN, action.label()),
     };
     let danger = matches!(action, PluginAction::Disable);
-    if !render_workbench_button(ui, icon, label, colors, danger, true).clicked() {
+    if !render_command_row(
+        ui,
+        ("plugin_action", label),
+        icon,
+        label,
+        colors,
+        danger,
+        true,
+    )
+    .clicked()
+    {
         return;
     }
 
@@ -1575,11 +1736,9 @@ fn render_plugin_action_button(
 }
 
 fn render_plugin_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColors) {
-    ui.horizontal(|ui| {
-        for action in plugin_actions(model) {
-            render_plugin_action_button(ui, model, colors, action);
-        }
-    });
+    for action in plugin_actions(model) {
+        render_plugin_action_button(ui, model, colors, action);
+    }
 }
 
 fn render_skill_action_button(
@@ -1588,10 +1747,11 @@ fn render_skill_action_button(
     colors: UiColors,
     action: SkillAction,
 ) {
-    let clicked = render_workbench_button(
+    let clicked = render_command_row(
         ui,
+        ("skill_action", action.label()),
         icons::skill_action_icon(action),
-        action.label(),
+        skill_action_command_label(action, false),
         colors,
         matches!(action, SkillAction::Disable),
         true,
@@ -1620,13 +1780,12 @@ fn render_skill_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColo
         .pending_disable_skill_instance_confirmation()
         .is_some()
     {
-        ui.label(
-            egui::RichText::new(SKILL_INSTANCE_DISABLE_CONFIRMATION_MESSAGE).color(colors.warning),
-        );
-        if render_workbench_button(
+        render_confirmation_message(ui, SKILL_INSTANCE_DISABLE_CONFIRMATION_MESSAGE, colors);
+        if render_command_row(
             ui,
+            "skill_confirm_disable",
             icons::DISABLE_SKILL,
-            "Confirm Disable",
+            skill_action_command_label(SkillAction::Disable, true),
             colors,
             true,
             true,
@@ -1638,11 +1797,9 @@ fn render_skill_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors: UiColo
         ui.add_space(4.0);
     }
 
-    ui.horizontal(|ui| {
-        for action in skill_actions(model) {
-            render_skill_action_button(ui, model, colors, action);
-        }
-    });
+    for action in skill_actions(model) {
+        render_skill_action_button(ui, model, colors, action);
+    }
 }
 
 fn render_agent_action_button(
@@ -1651,8 +1808,9 @@ fn render_agent_action_button(
     colors: UiColors,
     action: AgentAction,
 ) {
-    let clicked = render_workbench_button(
+    let clicked = render_command_row(
         ui,
+        ("agent_action", action.label()),
         icons::agent_action_icon(action),
         action.label(),
         colors,
@@ -1703,22 +1861,38 @@ fn render_agent_editor_controls(ui: &mut egui::Ui, model: &mut GuiModel, colors:
         model.update_agent_editor_identity(id_text, label_text);
         model.update_agent_editor_project_dir(project_dir_text);
 
-        ui.horizontal(|ui| {
-            if render_workbench_button(ui, icons::SAVE, "Save", colors, false, true).clicked() {
-                let _ = model.request_save_agent_editor();
-            }
-            if render_workbench_button(ui, icons::CANCEL, "Cancel", colors, false, true).clicked() {
-                model.cancel_agent_editor();
-            }
-        });
+        if render_command_row(
+            ui,
+            "agent_editor_save",
+            icons::SAVE,
+            "Save",
+            colors,
+            false,
+            true,
+        )
+        .clicked()
+        {
+            let _ = model.request_save_agent_editor();
+        }
+        if render_command_row(
+            ui,
+            "agent_editor_cancel",
+            icons::CANCEL,
+            "Cancel",
+            colors,
+            false,
+            true,
+        )
+        .clicked()
+        {
+            model.cancel_agent_editor();
+        }
         return;
     }
 
-    ui.horizontal(|ui| {
-        for action in agent_actions(model) {
-            render_agent_action_button(ui, model, colors, action);
-        }
-    });
+    for action in agent_actions(model) {
+        render_agent_action_button(ui, model, colors, action);
+    }
 }
 
 fn render_path_field(
@@ -1830,8 +2004,9 @@ fn render_project_action_button(
     colors: UiColors,
     action: ProjectAction,
 ) {
-    let clicked = render_workbench_button(
+    let clicked = render_command_row(
         ui,
+        ("project_action", action.label()),
         icons::project_action_icon(action),
         action.label(),
         colors,

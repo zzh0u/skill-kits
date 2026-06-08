@@ -21,11 +21,12 @@ use skill_kits::gui::state::{
 use skill_kits::gui::{
     agent_actions, dashboard_overview_grid, icons, inspector_line_presentation, native_options,
     path_validation_message, plugin_actions, plugin_row_disclosure, project_actions,
-    sidebar_grid_metrics, sidebar_nav_label, skill_actions, status_badge_fill, status_badge_stroke,
-    workbench_button_label, workbench_button_metrics, workbench_cell_alignment,
-    workbench_cell_content_offset_x, workbench_cell_style, workbench_chrome_top_inset,
-    workbench_content_grid, workbench_filter_width, workbench_renders_inspector_panel,
-    workbench_row_accepts_keyboard_key, workbench_row_fill, workbench_status_badge_rect,
+    sidebar_grid_metrics, sidebar_nav_label, skill_action_command_label, skill_actions,
+    status_badge_fill, status_badge_stroke, workbench_button_label, workbench_button_metrics,
+    workbench_cell_alignment, workbench_cell_content_offset_x, workbench_cell_style,
+    workbench_chrome_top_inset, workbench_command_row_metrics, workbench_content_grid,
+    workbench_filter_width, workbench_renders_inspector_panel, workbench_row_accepts_keyboard_key,
+    workbench_row_fill, workbench_static_labels_selectable, workbench_status_badge_rect,
     workbench_table_metrics, AgentAction, InspectorLineKind, InspectorLinePresentation,
     PathFieldKind, PluginAction, ProjectAction, SkillAction, SkillKitsGuiApp,
     WorkbenchCellAlignment, WorkbenchCellStyle, SIDEBAR_NAV_ROW_HEIGHT, SIDEBAR_WIDTH,
@@ -894,6 +895,22 @@ fn disabling_skill_instance_requires_inline_confirmation_copy() {
 }
 
 #[test]
+fn skill_disable_confirmation_uses_explicit_confirm_row_label() {
+    assert_eq!(
+        skill_action_command_label(SkillAction::Disable, false),
+        "Disable"
+    );
+    assert_eq!(
+        skill_action_command_label(SkillAction::Disable, true),
+        "Confirm Disable"
+    );
+    assert_eq!(
+        skill_action_command_label(SkillAction::ScanAgentSpaces, true),
+        "Scan Agent Spaces"
+    );
+}
+
+#[test]
 fn each_navigation_view_loads_from_app_paths_model() {
     let temp_dir = TempDir::new().unwrap();
     let paths = test_paths(&temp_dir);
@@ -1192,6 +1209,7 @@ fn workbench_grid_polish_helpers_keep_navigation_and_hover_states_stable() {
     let content_grid = workbench_content_grid(620.0);
     let dashboard_grid = dashboard_overview_grid(620.0);
     let button_metrics = workbench_button_metrics();
+    let command_row_metrics = workbench_command_row_metrics();
 
     assert_eq!(colors.surface_1, colors.canvas);
     assert_eq!(SIDEBAR_WIDTH, 244.0);
@@ -1213,11 +1231,7 @@ fn workbench_grid_polish_helpers_keep_navigation_and_hover_states_stable() {
         workbench_row_fill(false, false, colors),
         egui::Color32::TRANSPARENT
     );
-    assert_eq!(
-        workbench_row_fill(false, true, colors),
-        egui::Color32::from_rgb(0x14, 0x14, 0x14)
-    );
-    assert_ne!(workbench_row_fill(false, true, colors), colors.surface_2);
+    assert_eq!(workbench_row_fill(false, true, colors), colors.surface_2);
     assert_eq!(workbench_row_fill(true, false, colors), colors.surface_3);
     assert_eq!(workbench_row_fill(true, true, colors), colors.surface_3);
     assert_eq!(content_grid.inset, 12.0);
@@ -1234,6 +1248,12 @@ fn workbench_grid_polish_helpers_keep_navigation_and_hover_states_stable() {
     assert_eq!(button_metrics.radius, 4.0);
     assert_eq!(button_metrics.icon_width, 18.0);
     assert_eq!(button_metrics.horizontal_padding, 9.0);
+    assert!(!workbench_static_labels_selectable());
+    assert_eq!(command_row_metrics.height, 32.0);
+    assert_eq!(command_row_metrics.radius, content_grid.row_rounding);
+    assert_eq!(command_row_metrics.icon_x, 10.0);
+    assert_eq!(command_row_metrics.label_x, 36.0);
+    assert_eq!(command_row_metrics.inset, content_grid.inset);
     assert_eq!(workbench_filter_width("Agent"), 136.0);
     assert_eq!(workbench_filter_width("Scope"), 116.0);
     assert_eq!(workbench_filter_width("Status"), 112.0);
